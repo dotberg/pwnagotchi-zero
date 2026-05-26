@@ -205,7 +205,8 @@ public class PwngBrain {
             return d;
         }
         
-        // Find best target using Thompson Sampling
+        // Find best target using Thompson Sampling + signal strength bias
+        // Evil Twin only works if our phone can reach the client — prefer close APs
         ApKnowledge best = null;
         double bestSample = -999;
         for (ApKnowledge ap : apDB.values()) {
@@ -213,11 +214,18 @@ public class PwngBrain {
             if (blacklistedSsids.contains(ap.ssid)) continue;
             if (ap.evilTwinWorked) continue;
             
-            // Thompson sample + frequency bonus/penalty
-            double sample = thompsonSample(ap) * 100 + ap.signal * 0.01;
-            if (ap.freq > 5000) sample -= 50;
-            if (ap.freq < 2500) sample += 20;
+            // Signal-weighted Thompson sample
+            // Strong signal AP = close = our Evil Twin can reach its clients
+            double signalWeight = (ap.signal + 95) * 0.5;  // -75→10, -85→5, -95→0
+            if (signalWeight < 0) signalWeight = 0;
+            
+            double sample = thompsonSample(ap) * 100 + signalWeight * 3.0;
+            if (ap.freq > 5000) sample -= 50;     // 5GHz penalty
+            if (ap.freq < 2500) sample += 20;     // 2.4GHz bonus
             sample += ssidBonus(ap.ssid) * 0.1;
+            
+            // Hard filter: don't Evil Twin APs too far away (phone AP too weak)
+            if (ap.signal < -82) sample -= 200;
             
             if (best == null || sample > bestSample) {
                 best = ap;

