@@ -30,6 +30,8 @@ public class MainActivity extends Activity {
         }
     };
 
+    private static final String STOP_FILE = "/data/data/com.pwnagotchi.app/files/.stopped";
+
     @Override
     protected void onCreate(Bundle s) {
         super.onCreate(s);
@@ -40,20 +42,32 @@ public class MainActivity extends Activity {
 
         toggleButton.setOnClickListener(v -> {
             if (serviceRunning) {
-                stopService(new Intent(this, PwngService.class).setAction("STOP"));
+                // Use startService(STOP) so onStartCommand processes it + writes .stopped
+                Intent si = new Intent(this, PwngService.class);
+                si.setAction("STOP");
+                startService(si);
                 serviceRunning = false;
                 toggleButton.setText("[ START ]");
                 faceView.setText("(⇀‿‿↼)"); statusView.setText("sleeping...");
             } else {
-                startForegroundService(new Intent(this, PwngService.class));
+                // Clear .stopped so service can start
+                new java.io.File(STOP_FILE).delete();
+                startServiceCompat(new Intent(this, PwngService.class));
                 serviceRunning = true;
                 toggleButton.setText("[ STOP ]");
             }
         });
 
-        startForegroundService(new Intent(this, PwngService.class));
-        serviceRunning = true;
-        toggleButton.setText("⏹ STOP"); toggleButton.setBackgroundColor(0xFFC62828);
+        // Check if user previously stopped the service
+        if (new java.io.File(STOP_FILE).exists()) {
+            serviceRunning = false;
+            toggleButton.setText("[ START ]");
+            faceView.setText("(⇀‿‿↼)"); statusView.setText("sleeping...");
+        } else {
+            startServiceCompat(new Intent(this, PwngService.class));
+            serviceRunning = true;
+            toggleButton.setText("[ STOP ]");
+        }
     }
 
     @Override protected void onResume() {

@@ -367,11 +367,16 @@ public class PwngBrain {
             for (String s : blacklistedSsids) pw.println("blacklist=" + s);
             for (ApKnowledge ap : apDB.values()) {
                 pw.printf("ap=%s|%s|%s|%d|%d|%d|%d|%d|%b|%b\n",
-                    ap.bssid, ap.ssid, ap.flags, ap.signal, ap.freq,
+                    ap.bssid != null ? ap.bssid : "null",
+                    ap.ssid != null ? ap.ssid : "null",
+                    ap.flags != null ? ap.flags : "null",
+                    ap.signal, ap.freq,
                     ap.score, ap.attempts, ap.pmkidSuccess, ap.evilTwinWorked, ap.pmkidFound);
             }
             pw.close();
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            android.util.Log.e("PwngBrain", "saveMemory failed: " + e.getMessage(), e);
+        }
     }
     
     private void loadMemory() {

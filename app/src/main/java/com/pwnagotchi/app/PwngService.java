@@ -83,8 +83,8 @@ public class PwngService extends Service {
         // Start background scan loop - isRunning must be true first!
         isRunning = true;
         new Thread(() -> {
-            // First boot: randomize MAC for opsec before scanning
-            randomizeMac();
+            // MAC randomization deferred until WiFi is stable
+            // randomizeMac();  // disabled: causes scan hang on Moto
             while (isRunning) {
                 doScanCycle();
                 sleep(SCAN_INTERVAL);
@@ -115,6 +115,8 @@ public class PwngService extends Service {
 
     @Override
     public void onDestroy() {
+        // Write stop flag as safety net — prevents resurrection on activity reopen
+        try { new java.io.FileWriter(new java.io.File(STOP_FILE)).close(); } catch (Exception e) {}
         // Emergency WiFi recovery
         execSu("cmd wifi stop-softap");
         execSu("cmd wifi set-wifi-enabled enabled");
