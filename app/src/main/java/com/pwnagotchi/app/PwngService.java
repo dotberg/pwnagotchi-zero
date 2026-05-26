@@ -26,7 +26,7 @@ public class PwngService extends Service {
     private Handler handler;
     private Set<String> knownPmkids = new HashSet<>();
     private String currentFace = "(◕‿‿◕)";
-    private String currentStatus = "initializing brain...";
+    private String brain.currentStatus = "initializing brain...";
     private String currentPhase = "BOOT";
     private int apCount = 0, wpa2Count = 0;
     private int totalPmkids = 0, totalHandshakes = 0;
@@ -62,7 +62,7 @@ public class PwngService extends Service {
         
         brain = new PwngBrain();
         currentFace = "(◕‿‿◕)";
-        currentStatus = "brain ready, scanning...";
+        brain.currentStatus = "brain ready, scanning...";
         currentPhase = "OBSERVE";
         loadKnownPmkids();
         createNotificationChannel();
@@ -122,8 +122,8 @@ public class PwngService extends Service {
 
         PwngBrain.Decision d = brain.think(apTot, wpa2Tot, scanData);
         
-        if (d.face != null) currentFace = d.face;
-        if (d.status != null) currentStatus = d.status;
+        if (d.face != null) brain.currentFace = d.face;
+        if (d.status != null) brain.currentStatus = d.status;
         currentPhase = brain.getPhaseName();
         totalPmkids = brain.getTotalPmkids();
         totalHandshakes = brain.getTotalHandshakes();
@@ -142,7 +142,7 @@ public class PwngService extends Service {
     // ─── Actions ───────────────────────────────────────────
 
     private boolean doAggressiveHunt(String bssid, String ssid) {
-        currentStatus = "☠ hunting " + ssid;
+        brain.currentStatus = "☠ hunting " + ssid;
         updateNotification();
         
         String netId = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " add_network").trim();
@@ -178,7 +178,7 @@ public class PwngService extends Service {
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
         try {
             if (deauth) {
-                currentStatus = "👊 deauth " + ssid;
+                brain.currentStatus = "👊 deauth " + ssid;
                 updateNotification();
                 for (int i = 0; i < 3; i++) {
                     execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid +
@@ -192,7 +192,7 @@ public class PwngService extends Service {
                 + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
                 + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
             
-            currentStatus = "🎭 Evil Twin: " + ssid;
+            brain.currentStatus = "🎭 Evil Twin: " + ssid;
             updateNotification();
             
             execSu("cmd wifi set-wifi-enabled disabled"); sleep(1000);
@@ -216,8 +216,8 @@ public class PwngService extends Service {
                 sleep(3000);
             }
             
-            if (caught) { currentFace = FACES.get("FRIEND"); currentStatus = "🎭 CAUGHT: " + ssid; }
-            else currentStatus = "🎭 no client for " + ssid;
+            if (caught) { brain.currentFace = FACES.get("FRIEND"); brain.currentStatus = "🎭 CAUGHT: " + ssid; }
+            else brain.currentStatus = "🎭 no client for " + ssid;
             return caught;
             
         } finally {
@@ -320,8 +320,8 @@ public class PwngService extends Service {
         Intent si = new Intent(this, PwngService.class); si.setAction("STOP");
         PendingIntent sp = PendingIntent.getService(this, 0, si, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Pwnagotchi " + currentFace)
-            .setContentText("[" + currentPhase + "] " + currentStatus + " | APs:" + apCount)
+            .setContentTitle("Pwnagotchi " + brain.currentFace)
+            .setContentText("[" + currentPhase + "] " + brain.currentStatus + " | APs:" + apCount)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true).setContentIntent(p)
             .addAction(android.R.drawable.ic_media_pause, "Stop", sp).build();
@@ -331,7 +331,7 @@ public class PwngService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFY_ID, buildNotification());
         Intent u = new Intent("com.pwnagotchi.app.STATS_UPDATE");
         u.setPackage(getPackageName());
-        u.putExtra("face", currentFace); u.putExtra("status", currentStatus);
+        u.putExtra("face", brain.currentFace); u.putExtra("status", brain.currentStatus);
         u.putExtra("phase", currentPhase);
         u.putExtra("apCount", apCount); u.putExtra("wpa2Count", wpa2Count);
         u.putExtra("totalPmkids", totalPmkids); u.putExtra("totalHandshakes", totalHandshakes);

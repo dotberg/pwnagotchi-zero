@@ -70,16 +70,20 @@ public class MainActivity extends Activity {
             java.io.File f = new java.io.File("/data/data/com.pwnagotchi.app/files/brain.mem");
             if (!f.exists()) { phaseView.setText("PHASE: BOOT"); return; }
             java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(f));
-            String line, phaseStr = "BOOT";
+            String line, phaseStr = "BOOT", faceStr = "(◕‿‿◕)", statusStr = "thinking...";
             int pk = 0, hs = 0, cd = 0;
             while ((line = br.readLine()) != null) {
                 if (line.startsWith("phase=")) { int p = Integer.parseInt(line.substring(6)); phaseStr = p==0?"OBSERVE":p==1?"HUNT":"ATTACK"; }
                 else if (line.startsWith("total_pmkids=")) pk = Integer.parseInt(line.substring(13));
                 else if (line.startsWith("total_handshakes=")) hs = Integer.parseInt(line.substring(17));
                 else if (line.startsWith("cooldown=")) cd = Integer.parseInt(line.substring(9));
-                else if (line.startsWith("failed_et=")) { int fe = Integer.parseInt(line.substring(10)); statusView.setText("failed attacks: " + fe + " | targets left: scanning..."); }
+                else if (line.startsWith("face=")) faceStr = line.substring(5);
+                else if (line.startsWith("status=")) statusStr = line.substring(7);
+                else if (line.startsWith("failed_et=")) { int fe = Integer.parseInt(line.substring(10)); }
             }
             br.close();
+            faceView.setText(faceStr);
+            statusView.setText(statusStr);
             phaseView.setText("PHASE: " + phaseStr + " | CD: " + (cd/1000) + "s");
             statsView.setText(String.format("PMKIDs: %d | Handshakes: %d", pk, hs));
         } catch (Exception e) {

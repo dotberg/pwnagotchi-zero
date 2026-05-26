@@ -48,6 +48,10 @@ public class PwngBrain {
     private int failedEvilTwins = 0;
     private List<String> blacklistedSsids = new ArrayList<>();
     
+    // Display state (read by activity UI)
+    public String currentFace = "(◕‿‿◕)";
+    public String currentStatus = "initializing...";
+    
     public static class ApKnowledge {
         String bssid, ssid, flags;
         int signal, freq;
@@ -325,6 +329,8 @@ public class PwngBrain {
             pw.println("cooldown=" + cooldown);
             pw.println("total_pmkids=" + totalPmkids);
             pw.println("total_handshakes=" + totalHandshakes);
+            pw.println("face=" + currentFace);
+            pw.println("status=" + currentStatus);
             for (String s : blacklistedSsids) pw.println("blacklist=" + s);
             for (ApKnowledge ap : apDB.values()) {
                 pw.printf("ap=%s|%s|%s|%d|%d|%d|%d|%d|%b|%b\n",
@@ -348,6 +354,8 @@ public class PwngBrain {
                 else if (line.startsWith("cooldown=")) cooldown = Integer.parseInt(line.substring(9));
                 else if (line.startsWith("total_pmkids=")) totalPmkids = Integer.parseInt(line.substring(13));
                 else if (line.startsWith("total_handshakes=")) totalHandshakes = Integer.parseInt(line.substring(17));
+                else if (line.startsWith("face=")) currentFace = line.substring(5);
+                else if (line.startsWith("status=")) currentStatus = line.substring(7);
                 else if (line.startsWith("blacklist=")) blacklistedSsids.add(line.substring(10));
                 else if (line.startsWith("ap=")) {
                     String[] p = line.substring(3).split("\\|");
