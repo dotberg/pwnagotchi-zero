@@ -101,14 +101,8 @@ public class PwngBrain {
             }
         }
         
-        // Phase transition logic (aggressive timing)
-        if (phase == PHASE_OBSERVE && sessionAge > 30000) {  // 30s observe
-            phase = PHASE_HUNT;
-        }
-        if (phase == PHASE_HUNT && sessionAge > 90000) {     // 90s total -> attack
-            phase = PHASE_ATTACK;
-        }
-        if (wpa2Count >= 3 && sessionAge > 60000) {           // fast-track
+        // Phase transition logic — EVIL TWIN ONLY (no PMKID hunting)
+        if (phase == PHASE_OBSERVE && sessionAge > 30000) {  // 30s observe → straight to attack
             phase = PHASE_ATTACK;
         }
         
@@ -117,10 +111,10 @@ public class PwngBrain {
             return new Decision("wait", "cooldown " + ((cooldown - (now - lastAction))/1000) + "s");
         }
         
-        // Phase-specific logic
+        // Phase-specific logic — EVIL TWIN ONLY
         switch (phase) {
             case PHASE_OBSERVE: return thinkObserve();
-            case PHASE_HUNT:    return thinkHunt();
+            case PHASE_HUNT:    // fall through — no PMKID, straight to attack
             case PHASE_ATTACK:  return thinkAttack();
             default:            return new Decision("scan", "default");
         }
