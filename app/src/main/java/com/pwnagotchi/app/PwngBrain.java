@@ -29,7 +29,7 @@ public class PwngBrain {
     private int phase = PHASE_OBSERVE;
     private long sessionStart;
     private long lastAction;
-    private int cooldown = 30000; // 30s between actions
+    private int cooldown = 10000; // 10s initial (was 30s)
     
     // AP knowledge: BSSID -> {score, last_seen, flags, ssid, attempts, successes}
     private Map<String, ApKnowledge> apDB = new HashMap<>();
@@ -96,15 +96,15 @@ public class PwngBrain {
             }
         }
         
-        // Phase transition logic
-        if (phase == PHASE_OBSERVE && sessionAge > 120000) {
+        // Phase transition logic (aggressive timing)
+        if (phase == PHASE_OBSERVE && sessionAge > 30000) {  // 30s observe
             phase = PHASE_HUNT;
         }
-        if (phase == PHASE_HUNT && sessionAge > 600000 && successfulEvilTwins + failedEvilTwins < 3) {
+        if (phase == PHASE_HUNT && sessionAge > 90000) {     // 90s total -> attack
             phase = PHASE_ATTACK;
         }
-        // Fast-track to attack if we've had success with evil twin before
-        if (successfulEvilTwins > 0 && sessionAge > 180000) {
+        // Fast-track: go straight to attack after 60s if we have targets
+        if (wpa2Count >= 3 && sessionAge > 60000) {
             phase = PHASE_ATTACK;
         }
         
@@ -173,17 +173,22 @@ public class PwngBrain {
             return d;
         }
         
-        // Find best target for Evil Twin
+        // Find best target for Evil Twin - prefer 2.4GHz (our AP can't do 5GHz)
         ApKnowledge best = null;
+        int bestScore = -999;
         for (ApKnowledge ap : apDB.values()) {
             if (!ap.flags.contains("WPA2-PSK") && !ap.flags.contains("WPA-PSK")) continue;
             if (blacklistedSsids.contains(ap.ssid)) continue;
-            if (ap.evilTwinWorked) continue; // Already got this one
+            if (ap.evilTwinWorked) continue;
             
-            // Score: prefer strong signal + previously responsive PMKID
-            int apScore = ap.signal + ap.pmkidSuccess * 10;
-            if (best == null || apScore > (best.signal + best.pmkidSuccess * 10)) {
+            // 5GHz penalty: our hotspot only works on 2.4GHz!
+            int apScore = ap.signal + ap.pmkidSuccess * 10 + ssidBonus(ap.ssid);
+            if (ap.freq > 5000) apScore -= 50;  // Heavy penalty for 5GHz
+            if (ap.freq < 2500) apScore += 20;  // Bonus for 2.4GHz
+            
+            if (best == null || apScore > bestScore) {
                 best = ap;
+                bestScore = apScore;
             }
         }
         
@@ -247,16 +252,34 @@ public class PwngBrain {
         
         // Adjust cooldown based on success rate
         if (success) {
-            cooldown = Math.max(15000, cooldown - 5000);
-        } else {
-            cooldown = Math.min(120000, cooldown + 10000);
+            cooldown = Math.max(5000, cooldown - 5000);
+        } else if (!action.equals("wait") && !action.equals("scan")) {
+            cooldown = Math.min(60000, cooldown + 5000);
         }
         
-        lastAction = System.currentTimeMillis();
+        // Only reset timer for real actions (not idle scans/waits)
+        if (!action.equals("wait") && !action.equals("scan")) {
+            lastAction = System.currentTimeMillis();
+        }
         saveMemory();
     }
     
     // ─── AP Database ─────────────────────────────────────────
+    
+    // Heuristic: score SSID for likelihood of having clients
+    private int ssidBonus(String ssid) {
+        if (ssid == null) return 0;
+        String s = ssid.toLowerCase();
+        // Penalize guest/hotspot/iot networks (fewer clients)
+        if (s.contains("guest") || s.contains("-guest")) return -25;
+        if (s.contains("iot") || s.contains("fridge") || s.contains("tv") || s.contains("printer")) return -15;
+        if (s.contains("direct-") || s.contains("hotspot") || s.contains("mobile")) return -15;
+        // Bonus for networks that look like home/business networks
+        if (s.contains("funbox") || s.contains("netia") || s.contains("orange") || s.contains("play-")) return 10;
+        // Hidden SSIDs might be important
+        if (s.equals("<hidden>")) return 5;
+        return 0;
+    }
     
     private void updateApKnowledge(String[] ap) {
         // ap = {bssid, ssid, freq, signal, flags}
