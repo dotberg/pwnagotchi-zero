@@ -180,6 +180,6 @@ public class MainActivity extends Activity {
 
     private void startServiceCompat(Intent i) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
-            startServiceCompat(i); else startService(i);
+            startForegroundService(i); else startService(i);
     }
 }

