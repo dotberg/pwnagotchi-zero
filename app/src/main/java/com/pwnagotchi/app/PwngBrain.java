@@ -243,9 +243,19 @@ public class PwngBrain {
                     totalPmkids++;
                 }
             } else {
-                ap.score -= 1;
-                if (ap.attempts >= 5 && ap.score < -3) {
-                    blacklistedSsids.add(ap.ssid);
+                // Only blacklist for technical failures, not for "no client"
+                // "No client" is normal - try again later
+                if (action.equals("evil_twin") || action.equals("deauth_twin")) {
+                    // Evil Twin failed technically (WiFi restore issue etc) - penalize hard
+                    ap.score -= 3;
+                    if (ap.attempts >= 5 && ap.score < -10) {
+                        blacklistedSsids.add(ap.ssid);
+                    }
+                } else {
+                    ap.score -= 1;
+                    if (ap.attempts >= 8 && ap.score < -5) {
+                        blacklistedSsids.add(ap.ssid);
+                    }
                 }
             }
         }
