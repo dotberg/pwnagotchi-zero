@@ -7,4 +7,4 @@ brain.mem
 .known_pmkids
 *.22000
 *.keystore
-!.gitignore
+.DS_Store

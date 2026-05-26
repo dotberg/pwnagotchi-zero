@@ -26,7 +26,7 @@ public class PwngService extends Service {
     private Handler handler;
     private Set<String> knownPmkids = new HashSet<>();
     private String currentFace = "(◕‿‿◕)";
-    private String brain.currentStatus = "initializing brain...";
+    private String currentStatus = "initializing brain...";
     private String currentPhase = "BOOT";
     private int apCount = 0, wpa2Count = 0;
     private int totalPmkids = 0, totalHandshakes = 0;

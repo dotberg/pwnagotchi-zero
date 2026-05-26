@@ -2,6 +2,7 @@ package com.pwnagotchi.app;
 
 import java.io.*;
 import java.util.*;
+import java.util.Random;
 
 /**
  * Pwnagotchi AI Brain — autonomous decision engine.
@@ -107,8 +108,7 @@ public class PwngBrain {
         if (phase == PHASE_HUNT && sessionAge > 90000) {     // 90s total -> attack
             phase = PHASE_ATTACK;
         }
-        // Fast-track: go straight to attack after 60s if we have targets
-        if (wpa2Count >= 3 && sessionAge > 60000) {
+        if (wpa2Count >= 3 && sessionAge > 60000) {           // fast-track
             phase = PHASE_ATTACK;
         }
         
@@ -119,15 +119,36 @@ public class PwngBrain {
         
         // Phase-specific logic
         switch (phase) {
-            case PHASE_OBSERVE:
-                return thinkObserve();
-            case PHASE_HUNT:
-                return thinkHunt();
-            case PHASE_ATTACK:
-                return thinkAttack();
-            default:
-                return new Decision("scan", "default");
+            case PHASE_OBSERVE: return thinkObserve();
+            case PHASE_HUNT:    return thinkHunt();
+            case PHASE_ATTACK:  return thinkAttack();
+            default:            return new Decision("scan", "default");
         }
+    }
+
+    // ─── Thompson Sampling (Bayesian Bandit) ──────────────────
+    private Random rng = new Random();
+    
+    private double thompsonSample(ApKnowledge ap) {
+        int successes = ap.pmkidSuccess + ap.handshakeSuccess;
+        int failures = Math.max(0, ap.attempts - successes);
+        double alpha = successes + 1.0;
+        double betaParam = failures + 1.0;
+        double x = gammaSample(alpha);
+        double y = gammaSample(betaParam);
+        return x / (x + y + 0.0001);
+    }
+    
+    private double gammaSample(double shape) {
+        if (shape < 1) shape = 1;
+        double d = shape - 1.0/3.0;
+        double c = 1.0 / Math.sqrt(9.0 * d);
+        double x, v;
+        do {
+            x = rng.nextGaussian();
+            v = (1 + c * x) * (1 + c * x) * (1 + c * x);
+        } while (v <= 0);
+        return d * v;
     }
     
     private Decision thinkObserve() {
@@ -139,15 +160,22 @@ public class PwngBrain {
     }
     
     private Decision thinkHunt() {
-        // Find the best WPA2-PSK AP we haven't tried aggressive on yet
+        // Find the best WPA2-PSK AP using Thompson Sampling
         ApKnowledge best = null;
+        double bestSample = -999;
         for (ApKnowledge ap : apDB.values()) {
             if (!ap.flags.contains("WPA2-PSK") && !ap.flags.contains("WPA-PSK")) continue;
             if (ap.attempts >= 3) continue; // Don't retry too many times
             if (blacklistedSsids.contains(ap.ssid)) continue;
             
-            if (best == null || ap.signal > best.signal) {
+            // Thompson Sampling: pick AP with highest sampled reward
+            double sample = thompsonSample(ap) * 100 + ap.signal * 0.01;
+            if (ap.freq > 5000) sample -= 50;
+            if (ap.freq < 2500) sample += 20;
+            sample += ssidBonus(ap.ssid) * 0.1;
+            if (best == null || sample > bestSample) {
                 best = ap;
+                bestSample = sample;
             }
         }
         
@@ -177,22 +205,23 @@ public class PwngBrain {
             return d;
         }
         
-        // Find best target for Evil Twin - prefer 2.4GHz (our AP can't do 5GHz)
+        // Find best target using Thompson Sampling
         ApKnowledge best = null;
-        int bestScore = -999;
+        double bestSample = -999;
         for (ApKnowledge ap : apDB.values()) {
             if (!ap.flags.contains("WPA2-PSK") && !ap.flags.contains("WPA-PSK")) continue;
             if (blacklistedSsids.contains(ap.ssid)) continue;
             if (ap.evilTwinWorked) continue;
             
-            // 5GHz penalty: our hotspot only works on 2.4GHz!
-            int apScore = ap.signal + ap.pmkidSuccess * 10 + ssidBonus(ap.ssid);
-            if (ap.freq > 5000) apScore -= 50;  // Heavy penalty for 5GHz
-            if (ap.freq < 2500) apScore += 20;  // Bonus for 2.4GHz
+            // Thompson sample + frequency bonus/penalty
+            double sample = thompsonSample(ap) * 100 + ap.signal * 0.01;
+            if (ap.freq > 5000) sample -= 50;
+            if (ap.freq < 2500) sample += 20;
+            sample += ssidBonus(ap.ssid) * 0.1;
             
-            if (best == null || apScore > bestScore) {
+            if (best == null || sample > bestSample) {
                 best = ap;
-                bestScore = apScore;
+                bestSample = sample;
             }
         }
         
