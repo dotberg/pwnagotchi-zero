@@ -94,7 +94,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        registerReceiver(statsReceiver, new IntentFilter("com.pwnagotchi.app.STATS_UPDATE"));
+        registerReceiver(statsReceiver, new IntentFilter("com.pwnagotchi.app.STATS_UPDATE"), Context.RECEIVER_NOT_EXPORTED);
         pollHandler.post(pollTask);
     }
     @Override protected void onPause() {
