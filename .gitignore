@@ -1,0 +1,10 @@
+*.class
+*.dex
+obj/
+bin/
+*.apk
+brain.mem
+.known_pmkids
+*.22000
+*.keystore
+!.gitignore
