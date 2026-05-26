@@ -98,7 +98,12 @@ public class PwngService extends Service {
             isRunning = false;
             // Write stop flag so START_STICKY can't resurrect us
             try { new FileWriter(new File(STOP_FILE)).close(); } catch (Exception e) {}
-            stopForeground(true); stopSelf(); return START_NOT_STICKY;
+            stopForeground(true); stopSelf();
+            // Force-kill the process after 2s if thread didn't exit
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }, 2000);
+            return START_NOT_STICKY;
         }
         // Clear stop flag on normal start
         new File(STOP_FILE).delete();
@@ -158,6 +163,7 @@ public class PwngService extends Service {
         }
         
         brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
+        android.util.Log.i("PwngService", "cycle done action=" + d.action + " success=" + success + " phase=" + brain.getPhase());
         updateNotification();
     }
 
@@ -416,7 +422,7 @@ public class PwngService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Pwnagotchi", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Pwnagotchi", NotificationManager.IMPORTANCE_DEFAULT);
             ch.setDescription("AI-driven WiFi security research");
             getSystemService(NotificationManager.class).createNotificationChannel(ch);
         }
@@ -455,10 +461,18 @@ public class PwngService extends Service {
             BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
             BufferedReader er = new BufferedReader(new InputStreamReader(p.getErrorStream()));
             StringBuilder sb = new StringBuilder(); String l;
-            new Thread(() -> { try { Thread.sleep(10000); p.destroy(); } catch (Exception e) {} }).start();
+            // Watchdog: force-kill after 8 seconds if process hangs
+            final Process fp = p;
+            Thread watchdog = new Thread(() -> { 
+                try { Thread.sleep(8000); fp.destroyForcibly(); } 
+                catch (Exception e) {} 
+            });
+            watchdog.start();
             while ((l = br.readLine()) != null) sb.append(l).append("\n");
             while (er.readLine() != null) {}
-            br.close(); er.close(); p.waitFor();
+            br.close(); er.close();
+            p.waitFor();
+            watchdog.interrupt();
             return sb.toString();
         } catch (Exception e) { return ""; }
     }

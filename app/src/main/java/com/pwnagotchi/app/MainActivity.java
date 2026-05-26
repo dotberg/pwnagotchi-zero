@@ -20,6 +20,28 @@ public class MainActivity extends Activity {
     private TextView faceView, statusView, statsView, phaseView;
     private Button toggleButton;
     private boolean serviceRunning = false;
+    
+    private BroadcastReceiver statsReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent i) {
+            faceView.setText(i.getStringExtra("face"));
+            statusView.setText(i.getStringExtra("status"));
+            String phaseName = "???";
+            switch (i.getIntExtra("phase", -1)) {
+                case 0: phaseName = "OBSERVE"; break;
+                case 1: phaseName = "HUNT"; break;
+                case 2: phaseName = "ATTACK"; break;
+            }
+            int cd = (int)((i.getLongExtra("sessionStart", 0) > 0) 
+                ? Math.max(0, (System.currentTimeMillis() - i.getLongExtra("sessionStart", 0)) / 1000)
+                : 0);
+            phaseView.setText("PHASE: " + phaseName + " | UP: " + cd + "s");
+            statsView.setText(String.format("PMKIDs: %d | HS: %d | APs: %d",
+                i.getIntExtra("totalPmkids", 0),
+                i.getIntExtra("totalHandshakes", 0),
+                i.getIntExtra("apCount", 0)));
+        }
+    };
     private Handler pollHandler = new Handler();
     
     private Runnable pollTask = new Runnable() {
@@ -72,10 +94,12 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        registerReceiver(statsReceiver, new IntentFilter("com.pwnagotchi.app.STATS_UPDATE"));
         pollHandler.post(pollTask);
     }
     @Override protected void onPause() {
         super.onPause();
+        try { unregisterReceiver(statsReceiver); } catch (Exception e) {}
         pollHandler.removeCallbacks(pollTask);
     }
 
