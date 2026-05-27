@@ -1,45 +1,117 @@
-# Pwnagotchi Zero
+# Pwnagotchi Zero — Native Monitor Mode Edition
 
-**Autonomous AI-driven WiFi security research tool for rooted Android. Zero external hardware.**
+**Autonomous AI-driven WiFi security research tool for rooted Android. Now with native Qualcomm monitor mode — no external adapters, no custom ROM, no kernel patches.**
 
-[![Phase](https://img.shields.io/badge/AI-Thompson%20Sampling-blue)]()
+[![Monitor Mode](https://img.shields.io/badge/monitor%20mode-native-brightgreen)]()
 [![API](https://img.shields.io/badge/API-34%2B-green)]()
-[![Size](https://img.shields.io/badge/APK-25KB-brightgreen)]()
+[![Size](https://img.shields.io/badge/APK-33KB-brightgreen)]()
 [![License](https://img.shields.io/badge/license-MIT-red)]()
 
 ## What It Does
 
-Pwnagotchi Zero turns any rooted Android phone into an autonomous WiFi security testing platform. **No monitor mode, no external adapters, no Raspberry Pi required.**
+Pwnagotchi Zero turns any rooted Android phone into an autonomous WiFi security testing platform.
+
+**v1.6.2 introduces native monitor mode on Qualcomm QCACLD-3.0 chipsets (adrastea driver).** The internal WiFi chip now captures raw 802.11 frames with full radiotap headers — beacon frames, probe requests, data frames, everything. No external USB adapters, no custom kernels, no kernel module compilation hell.
 
 The AI brain uses **Thompson Sampling** (Bayesian bandit) to learn which access points are vulnerable and adapts its attack strategy over time.
 
 ## Features
 
+- **Native Monitor Mode** — Qualcomm QCACLD-3.0 monitor mode via firmware reload trick (see below)
 - **AI Brain** — Thompson Sampling with Beta distributions per AP, learns from experience
 - **Passive PMKID Capture** — Extracts PMKIDs from wpa_supplicant BSS info (RSN IE parsing)
 - **Aggressive PMKID Hunting** — Fake-associate to trigger PMKID in AP response
 - **Evil Twin** — Creates fake AP with target SSID, captures client handshakes
-- **nl80211 Deauth** — Sends spoofed deauth frames via mgmt_tx (no monitor mode!)
-- **3-Phase Learning** — OBSERVE (30s) → HUNT (aggressive) → ATTACK (evil twin)
+- **nl80211 Deauth** — Sends spoofed deauth frames via mgmt_tx
+- **3-Phase Learning** — OBSERVE → HUNT → ATTACK
+- **Big Notification** — High priority, expandable status display
 
-## Technical Deep Dive
+---
 
-### PMKID Extraction (No Monitor Mode)
-Uses `wpa_cli -p /data/vendor/wifi/wpa/sockets -i wlan0 bss <BSSID>` to get raw RSN IE hex data. Parses the TLV structure looking for tag `0x30` (RSN), extracts PMKID list field. Outputs hashcat `-m 22000` format.
+## 🔬 The Qualcomm Monitor Mode Breakthrough
 
-### nl80211 Deauth Injection
-Sends raw deauthentication frames through Linux's nl80211 netlink interface using `NL80211_CMD_FRAME`. The `MGMT_TX_RANDOM_TA` driver capability allows spoofed transmitter addresses — no monitor mode needed.
+*This is the part that took 6 hours of kernel module compilation hell to discover. Future researchers: skip the kernel modules, here's the trick.*
 
-### Evil Twin via hostapd
-Uses Android's `cmd wifi start-softap` to create a WPA2-PSK access point with the target SSID. Monitors hostapd logs for EAPOL handshake events from connecting clients.
+### The Problem
 
-### AI: Thompson Sampling
-Each AP is modeled as a Beta distribution: `Beta(α=successes+1, β=failures+1)`. The brain samples from each distribution and selects the highest value — naturally balancing exploration vs exploitation. No neural networks, no TensorFlow — pure Bayesian statistics.
+Qualcomm QCACLD-3.0 (adrastea driver on Motorola Edge 50 Fusion / cuscoi, kernel 5.10.198) has a `con_mode` parameter at `/sys/module/adrastea/parameters/con_mode`:
+
+- `0` = normal station mode
+- `4` = monitor mode
+
+But writing to it fails with `Permission denied` even as root. The `module_param` is declared with `S_IRUGO` (0444) — read-only. SELinux also blocks it. `CONFIG_MODULE_FORCE_LOAD=n` prevents forced loading. Kernel module compilation fails because `CONFIG_MODVERSIONS=y` enforces symbol CRC matching (and the vendor kernel's CRCs aren't in AOSP sources).
+
+### The Solution: Firmware Reload Trick
+
+The `con_mode` parameter becomes **writable during firmware reload**. The trick:
+
+1. Stage a copy of the WiFi firmware to a writable location
+2. Point the kernel's firmware loader at the staging directory
+3. Bring `wlan0` down
+4. Write `4` to `con_mode` — this triggers a firmware reload because the path changed
+5. During the reload, the parameter IS writable
+6. Bring `wlan0` back up — it's now in monitor mode with `link/ieee802.11/radiotap`
+
+### The Code
+
+```bash
+# Stage firmware
+MOD=adrastea
+FW=/data/local/tmp/fw
+mkdir -p $FW/$MOD
+cp /vendor/firmware_mnt/image/$MOD/* $FW/$MOD/
+
+# Set firmware path (forces reload on con_mode write)
+echo -n "$FW" > /sys/module/firmware_class/parameters/path
+
+# Bring down, set monitor mode, bring up
+ip link set wlan0 down
+echo 4 > /sys/module/$MOD/parameters/con_mode
+sleep 4
+ip link set wlan0 up
+
+# Verify
+cat /sys/module/$MOD/parameters/con_mode  # should show "4"
+iw dev wlan0 info                            # should show "type monitor"
+tcpdump -i wlan0 -n -e                       # beacons should appear
+```
+
+### Key Requirements
+
+| Requirement | Why |
+|-------------|-----|
+| Root (Magisk) | Writing to sysfs, firmware path, ip link |
+| SELinux permissive | `setenforce 0` is usually needed (USB ADB helps) |
+| `tcpdump` + `su -Z u:r:magisk:s0` | `CAP_NET_RAW` needed for packet capture from app context |
+| `iw` with `libnl` | Channel setting (Termux provides these) |
+| Firmware staging directory | Must contain ALL firmware files from the vendor partition |
+
+### dmesg Confirmation
+
+```
+adrastea: [9:I:HTT] htt_h2t_rx_ring_cfg_msg_ll : Monitor mode is enabled
+adrastea: [16394:I:HDD] __hdd_driver_mode_change: Acquire wakelock for monitor mode
+device wlan0 entered promiscuous mode
+```
+
+### Why This Works
+
+The Qualcomm WiFi firmware (bdwlan_cuscoi_ipa.bin) has monitor mode support compiled in — it's just disabled by the kernel config (`CONFIG_FEATURE_MONITOR_MODE_SUPPORT := n` in qcacld-3.0). The firmware itself supports it. The `con_mode=4` write during firmware reload tells the firmware to boot in monitor mode. The kernel's module_param permission check is bypassed because the firmware reload path takes a different code path.
+
+### Related Research
+
+- [kimocoder/qualcomm_android_monitor_mode](https://github.com/kimocoder/qualcomm_android_monitor_mode) — Original research on QCACLD monitor mode
+- [spiral009/aviumui-wlan-tools](https://github.com/spiral009/aviumui-wlan-tools) — OnePlus monitor mode scripts (inspired the firmware reload approach)
+- Qualcomm CodeLinaro `qcacld-3.0` — `CONFIG_FEATURE_MONITOR_MODE_SUPPORT` flag exists but is off by default
+
+---
 
 ## Requirements
 
-- **Rooted Android 8+** with Magisk
-- That's it. No external WiFi adapters, no monitor mode hardware.
+- **Rooted Android 8+** with Magisk (tested on Magisk 30.7)
+- **Termux** with `iw` and `libnl` (for channel control)
+- **Qualcomm WiFi chipset** using qcacld-3.0/adrastea driver
+- USB ADB (recommended — WiFi ADB is unstable for critical operations)
 
 ## Installation
 
@@ -47,54 +119,67 @@ Each AP is modeled as a Beta distribution: `Beta(α=successes+1, β=failures+1)`
 # Download latest APK from Releases
 adb install Pwnagotchi.apk
 
-# Push deauth binary (compiled from deauth/deauth.c)
-adb push deauth /data/data/com.pwnagotchi.app/deauth
-adb shell su -c 'chmod 755 /data/data/com.pwnagotchi.app/deauth'
+# The app auto-copies iw and firmware on first run
+# Manual pre-setup (one-time):
+adb shell su -c 'mkdir -p /data/local/tmp/fw/adrastea'
+adb shell su -c 'cp /vendor/firmware_mnt/image/adrastea/* /data/local/tmp/fw/adrastea/'
+adb shell su -c 'cp /data/data/com.termux/files/usr/bin/iw /data/local/tmp/iw'
+adb shell su -c 'cp /data/data/com.termux/files/usr/lib/libnl* /data/local/tmp/'
 ```
 
 ## Building from Source
 
 ```bash
-# Requirements: Android SDK, Eclipse ECJ, NDK r27+
-./build.sh          # Build APK
-./deauth/build.sh   # Build deauth binary (ARM64)
+# Requirements: Android SDK (build-tools 34), Eclipse ECJ
+curl -sL "https://repo1.maven.org/maven2/org/eclipse/jdt/ecj/3.33.0/ecj-3.33.0.jar" -o /tmp/ecj2.jar
+./build.sh          # Build APK (~33KB)
+adb install -r Pwnagotchi.apk
 ```
-
-## Usage
-
-1. Launch Pwnagotchi
-2. Tap `[ STOP ]` to start
-3. Let the AI work autonomously
-4. Export hashes: tap `[ EXPORT ]`
-5. Pull and crack: `adb pull /sdcard/pmkid_hashes.22000 . && hashcat -m 22000 pmkid_hashes.22000 rockyou.txt`
 
 ## Architecture
 
 ```
-Pwnagotchi.apk (25KB)
-├── PwngBrain.java      — Thompson Sampling AI engine
-├── PwngService.java    — Background scanning & attack service
-├── MainActivity.java   — Matrix-green UI
-└── deauth.c            — nl80211 deauth injection (ARM64 native)
+Pwnagotchi.apk (33KB)
+├── PwngBrain.java         — Thompson Sampling AI engine
+├── PwngService.java       — Background scanning & attack service
+├── MonitorManager.java    — Qualcomm monitor mode via firmware reload
+├── MainActivity.java      — Matrix-green UI
+├── wallpaper/
+│   └── MatrixWallpaper.java — Matrix rain live wallpaper (bonus!)
+└── deauth/                — nl80211 deauth injection (ARM64 native)
 ```
 
-## Cracking Hashes
+## Usage
 
-The app saves hashes in hashcat `-m 22000` format:
-```
-WPA*02*PMKID*BSSID*STAMAC*SSID***
-```
+1. Launch Pwnagotchi from app drawer
+2. Service starts automatically — notification shows face and AP count
+3. Pull down notification for expanded stats (APs, WPA2, handshakes, uptime)
+4. Let the AI work autonomously — it cycles through OBSERVE → HUNT → ATTACK
+5. Handshakes saved to `/sdcard/Android/data/com.pwnagotchi.app/files/handshakes/`
+6. Tap notification to open status screen, tap Stop to exit
 
-Crack with:
+## Manual Monitor Mode (without the app)
+
 ```bash
-hashcat -m 22000 pmkid_hashes.22000 rockyou.txt
+# Enable
+su -c 'mkdir -p /data/local/tmp/fw/adrastea'
+su -c 'cp /vendor/firmware_mnt/image/adrastea/* /data/local/tmp/fw/adrastea/'
+su -c 'echo -n "/data/local/tmp/fw" > /sys/module/firmware_class/parameters/path'
+su -c 'ip link set wlan0 down; echo 4 > /sys/module/adrastea/parameters/con_mode'
+sleep 4
+su -c 'ip link set wlan0 up'
+su -c 'export LD_LIBRARY_PATH=/data/local/tmp; /data/local/tmp/iw dev wlan0 set channel 6'
+su -Z u:r:magisk:s0 -c 'tcpdump -i wlan0 -n -e'
+
+# Disable (restore normal WiFi)
+su -c 'ip link set wlan0 down; echo 0 > /sys/module/adrastea/parameters/con_mode'
+sleep 2
+su -c 'svc wifi enable'
 ```
 
-## Legal
+## Creditz
 
-For authorized security research and penetration testing only. Use only on networks you own or have explicit permission to test.
+Built by **dotberg** — 6 hours of kernel module hell, solved by a firmware reload trick.
+Because the best tools come from being broke and having nothing but a rooted phone and determination.
 
-## Credits
-
-Built by **dotberg** — because the best tools come from being broke and having nothing but a rooted phone and determination.
-
+*"Monitor mode was always there. Qualcomm just hid it behind a firmware reload."*

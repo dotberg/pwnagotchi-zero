@@ -21,6 +21,8 @@ public class PwngService extends Service {
     private static final String WPA_CTRL = "/data/vendor/wifi/wpa/sockets";
     private static final String IFACE = "wlan0";
     private static final int SCAN_INTERVAL = 15000;
+    private volatile boolean monitorReady = false;
+    private MonitorManager monitor;
     private static final String STOP_FILE = "/data/data/com.pwnagotchi.app/files/.stopped";
 
     private PwngBrain brain;
@@ -73,6 +75,22 @@ public class PwngService extends Service {
         currentFace = "(◕‿‿◕)";
         brain.currentStatus = "brain ready, scanning...";
         currentPhase = "OBSERVE";
+        
+        // Initialize native monitor mode in background thread
+        monitor = new MonitorManager();
+        new Thread(() -> {
+            brain.currentStatus = "enabling monitor mode...";
+            updateNotification();
+            if (monitor.enable()) {
+                brain.currentStatus = "monitor mode active";
+                currentPhase = "MONITOR";
+            } else {
+                brain.currentStatus = "monitor failed, using fallback";
+            }
+            monitorReady = true;
+            updateNotification();
+        }, "MonitorInit").start();
+        
         loadKnownPmkids();
         createNotificationChannel();
         
@@ -80,11 +98,13 @@ public class PwngService extends Service {
         updateNotification();
         
         handler = new Handler(Looper.getMainLooper());
-        // Start background scan loop - isRunning must be true first!
+        // Start background scan loop AFTER monitor init
         isRunning = true;
         new Thread(() -> {
-            // MAC randomization deferred until WiFi is stable
-            // randomizeMac();  // disabled: causes scan hang on Moto
+            // Wait for monitor init to complete
+            while (!monitorReady && isRunning) {
+                sleep(500);
+            }
             while (isRunning) {
                 doScanCycle();
                 sleep(SCAN_INTERVAL);
@@ -120,9 +140,14 @@ public class PwngService extends Service {
 
     @Override
     public void onDestroy() {
-        // Write stop flag as safety net — prevents resurrection on activity reopen
+        // Write stop flag as safety net
         try { new java.io.FileWriter(new java.io.File(STOP_FILE)).close(); } catch (Exception e) {}
-        // Emergency WiFi recovery
+        // Disable monitor mode if active
+        if (monitor != null) {
+            monitor.disable();
+            return;  // monitor.disable() handles WiFi recovery
+        }
+        // Emergency WiFi recovery (fallback mode only)
         execSu("cmd wifi stop-softap");
         execSu("cmd wifi set-wifi-enabled enabled");
         super.onDestroy();
@@ -131,20 +156,60 @@ public class PwngService extends Service {
     // ─── AI Scan Loop ──────────────────────────────────────
 
     private void doScanCycle() {
-        // Scan
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan");
-        sleep(3500);
-        String results = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan_results");
-        
         List<String[]> scanData = new ArrayList<>();
         int apTot = 0, wpa2Tot = 0;
-        for (String line : results.split("\n")) {
-            if (line.startsWith("bssid") || line.trim().isEmpty()) continue;
-            String[] p = line.split("\t");
-            if (p.length < 5) continue;
-            apTot++; if (p[3].contains("WPA")) wpa2Tot++;
-            scanData.add(new String[]{p[0].trim(), p[4].trim(), p[1].trim(), p[2].trim(), p[3].trim()});
+        
+        if (monitorReady && monitor != null && monitor.isEnabled()) {
+            // ── Native monitor mode scan via tcpdump ──
+            String raw = monitor.scan(8);
+            for (String line : raw.split("\\n")) {
+                // Parse tcpdump beacon lines: "... BSSID:xx:xx SA:yy:yy Beacon (SSID)..."
+                if (!line.contains("Beacon")) continue;
+                
+                String bssid = "", ssid = "<hidden>", flags = "[WPA2]", freq = "0", signal = "0";
+                
+                // Extract BSSID
+                java.util.regex.Matcher m1 = java.util.regex.Pattern.compile(
+                    "BSSID:([0-9a-f:]{17})").matcher(line);
+                if (m1.find()) bssid = m1.group(1);
+                if (bssid.isEmpty()) continue;
+                
+                // Extract SSID
+                java.util.regex.Matcher m2 = java.util.regex.Pattern.compile(
+                    "Beacon \\(([^)]*)\\)").matcher(line);
+                if (m2.find() && !m2.group(1).isEmpty()) ssid = m2.group(1);
+                
+                // Extract frequency/channel
+                java.util.regex.Matcher m3 = java.util.regex.Pattern.compile(
+                    "(\\d+) MHz").matcher(line);
+                if (m3.find()) freq = m3.group(1);
+                
+                // Extract RSSI
+                java.util.regex.Matcher m4 = java.util.regex.Pattern.compile(
+                    "(-?\\d+)dBm signal").matcher(line);
+                if (m4.find()) signal = m4.group(1);
+                
+                apTot++;
+                if (line.contains("PRIVACY")) { wpa2Tot++; flags = "[WPA2]"; }
+                else flags = "[OPEN]";
+                
+                scanData.add(new String[]{bssid, ssid, freq, signal, flags});
+            }
+        } else {
+            // ── Fallback: wpa_cli scan ──
+            execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan");
+            sleep(3500);
+            String results = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan_results");
+            
+            for (String line : results.split("\\n")) {
+                if (line.startsWith("bssid") || line.trim().isEmpty()) continue;
+                String[] p = line.split("\\t");
+                if (p.length < 5) continue;
+                apTot++; if (p[3].contains("WPA")) wpa2Tot++;
+                scanData.add(new String[]{p[0].trim(), p[4].trim(), p[1].trim(), p[2].trim(), p[3].trim()});
+            }
         }
+        
         apCount = apTot; wpa2Count = wpa2Tot;
 
         PwngBrain.Decision d = brain.think(apTot, wpa2Tot, scanData);
@@ -422,8 +487,9 @@ public class PwngService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Pwnagotchi", NotificationManager.IMPORTANCE_DEFAULT);
+            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Pwnagotchi", NotificationManager.IMPORTANCE_HIGH);
             ch.setDescription("AI-driven WiFi security research");
+            ch.setShowBadge(true);
             getSystemService(NotificationManager.class).createNotificationChannel(ch);
         }
     }
@@ -433,11 +499,26 @@ public class PwngService extends Service {
         PendingIntent p = PendingIntent.getActivity(this, 0, pi, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent si = new Intent(this, PwngService.class); si.setAction("STOP");
         PendingIntent sp = PendingIntent.getService(this, 0, si, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        
+        String face = brain != null ? brain.currentFace : "(◕‿‿◕)";
+        String phase = currentPhase;
+        String status = brain != null ? brain.currentStatus : "booting...";
+        int mins = (int)((System.currentTimeMillis() - sessionStart) / 60000);
+        
+        String title = face + " Pwnagotchi";
+        String summary = "APs:" + apCount + " | WPA2:" + wpa2Count + " | HS:" + totalHandshakes + " | " + mins + "m";
+        String bigText = "[" + phase + "] " + status + "\n"
+                       + "APs: " + apCount + "  WPA2: " + wpa2Count + "\n"
+                       + "Handshakes: " + totalHandshakes + "  PMKID: " + totalPmkids + "\n"
+                       + "Uptime: " + mins + " min | Channel: 6";
+        
         return new Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Pwnagotchi " + (brain != null ? brain.currentFace : "(◕‿‿◕)"))
-            .setContentText("[" + currentPhase + "] " + (brain != null ? brain.currentStatus : "booting...") + " | APs:" + apCount)
+            .setContentTitle(title)
+            .setContentText(summary)
+            .setStyle(new Notification.BigTextStyle().bigText(bigText))
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true).setContentIntent(p)
+            .setPriority(Notification.PRIORITY_HIGH)
             .addAction(android.R.drawable.ic_media_pause, "Stop", sp).build();
     }
 

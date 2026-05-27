@@ -18,7 +18,9 @@ $BUILD_TOOLS/aapt2 link -o obj/base.apk -I $ANDROID_JAR \
 # Compile Java
 java -jar $ECJ -source 8 -target 8 -cp $ANDROID_JAR:obj/gen \
     -d obj/classes -warn:none \
-    app/src/main/java/com/pwnagotchi/app/*.java obj/gen/com/pwnagotchi/app/R.java
+    app/src/main/java/com/pwnagotchi/app/*.java \
+    app/src/main/java/com/pwnagotchi/wallpaper/*.java \
+    obj/gen/com/pwnagotchi/app/R.java
 
 # Dex
 $BUILD_TOOLS/d8 --lib $ANDROID_JAR --min-api 31 \
