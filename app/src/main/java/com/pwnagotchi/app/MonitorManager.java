@@ -54,9 +54,7 @@ public class MonitorManager {
             if (alreadyOn) {
                 monitorEnabled = true;
                 System.out.println("[Monitor] Already active (con_mode=" + mode + ")");
-                // Ensure interface is up
-                execSu(IP + " link set " + IFACE + " up 2>/dev/null");
-                setChannel(6);
+                // Channel set handled externally via starter script
             } else {
                 // Try to enable via starter script
                 String output = execSu("sh /data/local/tmp/monitor_start.sh");

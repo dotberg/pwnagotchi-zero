@@ -127,11 +127,11 @@ public class PwngService extends Service {
         }
         // Clear stop flag on normal start
         new File(STOP_FILE).delete();
+        // Immediately start foreground with placeholder (Android kills services that don't)
         try {
             startForeground(NOTIFY_ID, buildNotification());
-        } catch (SecurityException e) {
-            // Missing permission — gracefully degrade
-            android.util.Log.e("PwngService", "startForeground failed: " + e.getMessage());
+        } catch (Exception e) {
+            android.util.Log.e("Pwng", "fg failed: " + e.getMessage());
         }
         return START_STICKY;
     }
@@ -505,12 +505,13 @@ public class PwngService extends Service {
         String status = brain != null ? brain.currentStatus : "booting...";
         int mins = (int)((System.currentTimeMillis() - sessionStart) / 60000);
         
-        String title = face + " Pwnagotchi";
-        String summary = "APs:" + apCount + " | WPA2:" + wpa2Count + " | HS:" + totalHandshakes + " | " + mins + "m";
-        String bigText = "[" + phase + "] " + status + "\n"
+        String title = face + " [" + phase + "] " + status;
+        String summary = "APs:" + apCount + " WPA2:" + wpa2Count + " HS:" + totalHandshakes + " " + mins + "m";
+        String bigText = face + "  [" + phase + "]\n"
+                       + status + "\n"
                        + "APs: " + apCount + "  WPA2: " + wpa2Count + "\n"
                        + "Handshakes: " + totalHandshakes + "  PMKID: " + totalPmkids + "\n"
-                       + "Uptime: " + mins + " min | Channel: 6";
+                       + "Uptime: " + mins + " min | Ch:6";
         
         return new Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
