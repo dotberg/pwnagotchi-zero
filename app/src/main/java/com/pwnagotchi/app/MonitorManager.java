@@ -133,19 +133,20 @@ public class MonitorManager {
     public String captureHandshake(String outputDir, String bssid, int durationSeconds) {
         if (!monitorEnabled) return null;
         
-        String ts = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss").format(new java.util.Date());
+        String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String path = outputDir + "/hs_" + bssid.replace(":", "") + "_" + ts + ".pcap";
-        String filter = "ether proto 0x888e or wlan fc type mgt subtype assoc-req or wlan fc type mgt subtype reassoc-req";
+        // Capture ALL frames for this BSSID (EAPOL filter broken on radiotap)
+        String filter = "wlan addr3 " + bssid;
         
-        execSuMagisk("timeout " + durationSeconds + " tcpdump -i " + IFACE + " -w " + path + " " + filter + " 2>/dev/null");
+        execSu("tcpdump -i " + IFACE + " -w " + path + " -c 50 " + filter + " 2>/dev/null &");
+        
+        try { Thread.sleep(5000); } catch (Exception e) {}
         
         java.io.File f = new java.io.File(path);
-        if (f.exists() && f.length() > 68) {  // > pcap header size
-            System.out.println("[Monitor] Handshake captured: " + path + " (" + f.length() + " bytes)");
+        if (f.exists() && f.length() > 68) {
+            System.out.println("[Monitor] Handshake: " + path + " (" + f.length() + " bytes)");
             return path;
         }
-        // Clean up empty files
-        if (f.exists() && f.length() <= 68) f.delete();
         return null;
     }
     

@@ -64,8 +64,7 @@ public class PwngService extends Service {
         sessionStart = System.currentTimeMillis();
         
         File extDir = getExternalFilesDir(null);
-        lootDir = extDir != null ? new File(extDir, "handshakes").getAbsolutePath()
-                                 : getFilesDir() + "/handshakes";
+        lootDir = "/data/local/tmp/handshakes";  // magisk context can't write to sdcard
         new File(lootDir).mkdirs();
         
         String macRaw = execSu("ip link show wlan0 2>/dev/null | grep -oP 'link/ether \\K[0-9a-f:]+' | head -1");
