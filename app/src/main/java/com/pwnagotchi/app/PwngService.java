@@ -162,29 +162,28 @@ public class PwngService extends Service {
         if (monitorReady && monitor != null && monitor.isEnabled()) {
             // ── Native monitor mode scan via tcpdump ──
             String raw = monitor.scan(8);
+            Set<String> seenBssids = new HashSet<>();
+            List<String[]> apList = new ArrayList<>();
+            
             for (String line : raw.split("\\n")) {
-                // Parse tcpdump beacon lines: "... BSSID:xx:xx SA:yy:yy Beacon (SSID)..."
                 if (!line.contains("Beacon")) continue;
                 
                 String bssid = "", ssid = "<hidden>", flags = "[WPA2]", freq = "0", signal = "0";
                 
-                // Extract BSSID
                 java.util.regex.Matcher m1 = java.util.regex.Pattern.compile(
                     "BSSID:([0-9a-f:]{17})").matcher(line);
                 if (m1.find()) bssid = m1.group(1);
-                if (bssid.isEmpty()) continue;
+                if (bssid.isEmpty() || seenBssids.contains(bssid)) continue;
+                seenBssids.add(bssid);
                 
-                // Extract SSID
                 java.util.regex.Matcher m2 = java.util.regex.Pattern.compile(
                     "Beacon \\(([^)]*)\\)").matcher(line);
                 if (m2.find() && !m2.group(1).isEmpty()) ssid = m2.group(1);
                 
-                // Extract frequency/channel
                 java.util.regex.Matcher m3 = java.util.regex.Pattern.compile(
                     "(\\d+) MHz").matcher(line);
                 if (m3.find()) freq = m3.group(1);
                 
-                // Extract RSSI
                 java.util.regex.Matcher m4 = java.util.regex.Pattern.compile(
                     "(-?\\d+)dBm signal").matcher(line);
                 if (m4.find()) signal = m4.group(1);
@@ -193,8 +192,9 @@ public class PwngService extends Service {
                 if (line.contains("PRIVACY")) { wpa2Tot++; flags = "[WPA2]"; }
                 else flags = "[OPEN]";
                 
-                scanData.add(new String[]{bssid, ssid, freq, signal, flags});
+                apList.add(new String[]{bssid, ssid, freq, signal, flags});
             }
+            scanData = apList;
         } else {
             // ── Fallback: wpa_cli scan ──
             execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " scan");

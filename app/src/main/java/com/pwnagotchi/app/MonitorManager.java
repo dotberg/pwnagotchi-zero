@@ -9,6 +9,7 @@ import java.io.*;
 public class MonitorManager {
     
     private static final String MODULE = "adrastea";
+    private static final String IP = "/system/bin/ip";
     private static final String CON_MODE_PATH = "/sys/module/" + MODULE + "/parameters/con_mode";
     private static final String FW_PATH = "/sys/module/firmware_class/parameters/path";
     private static final String STAGING_DIR = "/data/local/tmp/fw";
@@ -46,60 +47,25 @@ public class MonitorManager {
     public boolean enable() {
         if (monitorEnabled) return true;
         
-        if (!stageFirmware()) {
-            System.err.println("[Monitor] Firmware staging failed");
-            return false;
-        }
-        
+        // Check if monitor is already active (set up manually or by boot script)
         try {
-            // Just bring wlan0 down directly — don't touch svc wifi
-            // (svc wifi disable asynchronously kills the interface later)
-            execSuMagisk("ip link set " + IFACE + " down 2>/dev/null");
-            Thread.sleep(1500);
-            
-            // Set firmware path (needs root)
-            execSu("echo -n '" + STAGING_DIR + "' > " + FW_PATH);
-            
-            // Bring interface down, set con_mode, bring up
-            execSuMagisk("ip link set " + IFACE + " down 2>/dev/null");
-            Thread.sleep(1000);
-            
-            // Set con_mode=4 (triggers firmware reload)
-            execSu("echo 4 > " + CON_MODE_PATH);
-            Thread.sleep(4000);
-            
-            // Bring interface up - needs NET_ADMIN from magisk context
-            execSuMagisk("ip link set " + IFACE + " up 2>/dev/null");
-            Thread.sleep(1500);
-            
-            // Verify interface is up
-            String linkState = execSu("ip link show " + IFACE + " 2>/dev/null | grep -o 'state UP\\|state DOWN'").trim();
-            if (!linkState.contains("UP")) {
-                // Retry
-                execSuMagisk("ip link set " + IFACE + " up 2>/dev/null");
-                Thread.sleep(1000);
-            }
-            
-            // Verify - read first line only
-            String modeRaw = execSu("cat " + CON_MODE_PATH);
-            String mode = modeRaw != null ? modeRaw.split("\\n")[0].trim() : "";
-            monitorEnabled = "4".equals(mode);
-            
-            if (monitorEnabled) {
-                System.out.println("[Monitor] Enabled (con_mode=" + mode + ")");
-                // Copy iw to global location if needed
-                execSu("cp /data/data/com.termux/files/usr/bin/iw " + IW_BIN + " 2>/dev/null; cp /data/data/com.termux/files/usr/lib/libnl* " + IW_LIBS + "/ 2>/dev/null");
-                // Set initial channel
+            String mode = execSu("cat " + CON_MODE_PATH).trim().split("\\n")[0];
+            boolean alreadyOn = "4".equals(mode);
+            if (alreadyOn) {
+                monitorEnabled = true;
+                System.out.println("[Monitor] Already active (con_mode=" + mode + ")");
+                // Ensure interface is up
+                execSu(IP + " link set " + IFACE + " up 2>/dev/null");
                 setChannel(6);
             } else {
-                System.err.println("[Monitor] Failed (con_mode=" + mode + ")");
+                // Try to enable via starter script
+                String output = execSu("sh /data/local/tmp/monitor_start.sh");
+                monitorEnabled = output.contains("MONITOR_OK");
             }
-            
-            return monitorEnabled;
         } catch (Exception e) {
-            System.err.println("[Monitor] Error: " + e.getMessage());
-            return false;
+            monitorEnabled = false;
         }
+        return monitorEnabled;
     }
     
     /**
@@ -109,7 +75,7 @@ public class MonitorManager {
         if (!monitorEnabled) return true;
         
         try {
-            execSuMagisk("ip link set " + IFACE + " down 2>/dev/null");
+            execSu(IP + " link set " + IFACE + " down 2>/dev/null");
             Thread.sleep(500);
             execSu("echo 0 > " + CON_MODE_PATH);
             Thread.sleep(2000);
@@ -128,8 +94,8 @@ public class MonitorManager {
      * Set the monitor channel via iw.
      */
     public void setChannel(int channel) {
-        String cmd = "export LD_LIBRARY_PATH=" + IW_LIBS + "; " + IW_BIN + " dev " + IFACE + " set channel " + channel;
-        execSuMagisk(cmd);
+        String cmd = "LD_LIBRARY_PATH=" + IW_LIBS + " " + IW_BIN + " dev " + IFACE + " set channel " + channel;
+        execSu(cmd);
         try { Thread.sleep(500); } catch (Exception e) {}
     }
     
@@ -171,7 +137,7 @@ public class MonitorManager {
      * Execute a command as root via su.
      */
     private String execSu(String cmd) {
-        return exec(new String[]{"su", "-c", cmd + " 2>&1; exit"});
+        return exec(new String[]{"su", "-mm", "-c", cmd + " 2>&1; exit"});
     }
     
     /**
