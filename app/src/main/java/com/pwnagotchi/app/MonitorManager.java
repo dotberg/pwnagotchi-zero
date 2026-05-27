@@ -135,12 +135,11 @@ public class MonitorManager {
         
         String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String path = outputDir + "/hs_" + bssid.replace(":", "") + "_" + ts + ".pcap";
-        // Capture ALL frames for this BSSID (EAPOL filter broken on radiotap)
         String filter = "wlan addr3 " + bssid;
         
-        execSu("tcpdump -i " + IFACE + " -w " + path + " -c 50 " + filter + " 2>/dev/null &");
-        
-        try { Thread.sleep(5000); } catch (Exception e) {}
+        // Run tcpdump with timeout, capture up to 20 packets then exit
+        String cmd = "timeout 10 tcpdump -i " + IFACE + " -w " + path + " -c 20 " + filter + " 2>/dev/null";
+        execSu(cmd);
         
         java.io.File f = new java.io.File(path);
         if (f.exists() && f.length() > 68) {
