@@ -1,6 +1,8 @@
 package com.pwnagotchi.app;
 
 import java.io.*;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 /**
  * Manages native WiFi monitor mode on Qualcomm adrastea (QCACLD-3.0).
@@ -117,25 +119,33 @@ public class MonitorManager {
     }
     
     /**
-     * Capture to a pcap file with optional BPF filter.
+     * Passive handshake capture via tcpdump (EAPOL filter).
+     * Returns path to pcap if handshake frames were captured, null otherwise.
      */
-    public String capture(String outputPath, int durationSeconds, String filter) {
+    public String captureHandshake(String outputDir, String bssid, int durationSeconds) {
         if (!monitorEnabled) return null;
         
-        String filterPart = (filter != null && !filter.isEmpty()) ? " " + filter : "";
-        String cmd = "timeout " + durationSeconds + " tcpdump -i " + IFACE 
-                     + " -w " + outputPath + filterPart + " 2>/dev/null";
-        execSu(cmd);
+        String ts = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss").format(new java.util.Date());
+        String path = outputDir + "/hs_" + bssid.replace(":", "") + "_" + ts + ".pcap";
+        String filter = "ether proto 0x888e or wlan fc type mgt subtype assoc-req or wlan fc type mgt subtype reassoc-req";
         
-        File f = new File(outputPath);
-        return (f.exists() && f.length() > 100) ? outputPath : null;
+        execSuMagisk("timeout " + durationSeconds + " tcpdump -i " + IFACE + " -w " + path + " " + filter + " 2>/dev/null");
+        
+        java.io.File f = new java.io.File(path);
+        if (f.exists() && f.length() > 68) {  // > pcap header size
+            System.out.println("[Monitor] Handshake captured: " + path + " (" + f.length() + " bytes)");
+            return path;
+        }
+        // Clean up empty files
+        if (f.exists() && f.length() <= 68) f.delete();
+        return null;
     }
     
     /**
      * Execute a command as root via su.
      */
     private String execSu(String cmd) {
-        return exec(new String[]{"su", "-mm", "-c", cmd + " 2>&1; exit"});
+        return exec(new String[]{"su", "-c", cmd + " 2>&1; exit"});
     }
     
     /**

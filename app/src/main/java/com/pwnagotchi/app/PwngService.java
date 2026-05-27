@@ -221,10 +221,25 @@ public class PwngService extends Service {
         totalHandshakes = brain.getTotalHandshakes();
 
         boolean success = false;
-        switch (d.action) {
-            case "aggressive":  success = doAggressiveHunt(d.targetBssid, d.targetSsid); break;
-            case "evil_twin":   success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, false); break;
-            case "deauth_twin": success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, true); break;
+        
+        // Passive handshake capture in monitor mode (no evil twin needed!)
+        if (monitorReady && monitor != null && monitor.isEnabled() && d.targetBssid != null) {
+            brain.currentStatus = "📡 listening on " + (d.targetSsid != null ? d.targetSsid : d.targetBssid);
+            updateNotification();
+            String hs = monitor.captureHandshake(lootDir, d.targetBssid, 20);
+            if (hs != null) {
+                totalHandshakes++;
+                success = true;
+                brain.currentStatus = "💀 handshake! " + d.targetSsid;
+            }
+        }
+        
+        if (!success) {
+            switch (d.action) {
+                case "aggressive":  success = doAggressiveHunt(d.targetBssid, d.targetSsid); break;
+                case "evil_twin":   success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, false); break;
+                case "deauth_twin": success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, true); break;
+            }
         }
         
         brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
