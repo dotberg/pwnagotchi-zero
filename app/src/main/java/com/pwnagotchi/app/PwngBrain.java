@@ -7,18 +7,18 @@ import java.util.Random;
 /**
  * Pwnagotchi AI Brain — autonomous decision engine.
  * 
- * Learns which APs respond to which attacks, adapts strategy over time.
+ * Learns which APs respond to attacks, adapts strategy over time.
+ * v2.0: Sniff-native architecture. No Evil Twin, no WiFi toggling.
  * 
  * Phases:
- *   PHASE_OBSERVE (0-120s): Passive scan only, learn environment
- *   PHASE_HUNT (120-600s): Aggressive PMKID hunting on promising APs
- *   PHASE_ATTACK (600s+): Evil Twin + deauth on learned targets
+ *   PHASE_OBSERVE (0-30s): Passive scan only, learn environment
+ *   PHASE_HUNT (disabled): Falls through to attack
+ *   PHASE_ATTACK (30s+): CSA deauth + passive EAPOL sniff
  * 
  * Scoring:
- *   +1  PMKID captured (passive/aggressive)
- *   +3  Handshake captured (evil twin)
- *   -1  Failed attempt (no response)
- *   +5  Deauth success (AP went down briefly)
+ *   +1  PMKID captured (passive)
+ *   +5  Handshake captured (sniff_deauth)
+ *   -1  Failed attempt (no EAPOL)
  */
 public class PwngBrain {
     
@@ -67,7 +67,7 @@ public class PwngBrain {
     }
     
     public static class Decision {
-        public String action; // "scan", "aggressive", "evil_twin", "deauth_twin", "wait"
+        public String action; // "scan", "sniff_deauth", "wait"
         public String targetBssid;
         public String targetSsid;
         public int targetFreq;
@@ -191,8 +191,8 @@ public class PwngBrain {
     }
     
     private Decision thinkAttack() {
-        // Only attack if enough APs around (stealth)
-        if (currentWpa2Count < 2) {
+        // Only attack if at least 1 WPA2 AP visible
+        if (currentWpa2Count < 1) {
             Decision d = new Decision("scan", "too few targets for attack");
             d.face = "(≖__≖)";
             d.status = "waiting for more APs...";
@@ -200,30 +200,30 @@ public class PwngBrain {
         }
         
         // Find best target using Thompson Sampling + signal strength bias
-        // Evil Twin only works if our phone can reach the client — prefer close APs
+        // Sniff-deauth works best on close APs where we can hear both AP and client
         ApKnowledge best = null;
         double bestSample = -999;
         for (ApKnowledge ap : apDB.values()) {
             if (!ap.flags.contains("WPA2-PSK") && !ap.flags.contains("WPA-PSK")) continue;
-            // Skip APs with enforced PMF only — SAE alone does NOT block deauth on 2.4 GHz
-            // MFP/PMF in flags with "capable" (not "required") still allows unprotected deauth
-            if (ap.flags.contains("MFP") && !ap.flags.contains("WPA2-PSK")) continue;
-            if (ap.flags.contains("PMF") && !ap.flags.contains("WPA2-PSK")) continue;
+            // Skip SAE/WPA3 — deauth doesn't work on PMF-required APs
+            if (ap.flags.contains("SAE")) continue;
             if (blacklistedSsids.contains(ap.ssid)) continue;
-            if (ap.evilTwinWorked) continue;
+            if (ap.handshakeSuccess > 0) continue;  // already got this one
             
             // Signal-weighted Thompson sample
-            // Strong signal AP = close = our Evil Twin can reach its clients
-            double signalWeight = (ap.signal + 95) * 0.5;  // -75→10, -85→5, -95→0
+            // Strong signal = can hear both AP and client clearly
+            double signalWeight = (ap.signal + 95) * 0.5;  // -45→25, -60→17.5, -75→10, -85→5, -95→0
             if (signalWeight < 0) signalWeight = 0;
             
-            double sample = thompsonSample(ap) * 100 + signalWeight * 3.0;
-            if (ap.freq > 5000) sample -= 50;     // 5GHz penalty
-            if (ap.freq < 2500) sample += 20;     // 2.4GHz bonus
+            double sample = thompsonSample(ap) * 20 + signalWeight * 4.0;
+            if (ap.freq > 5000) sample -= 30;     // 5GHz penalty (shorter range)
+            if (ap.freq < 2500) sample += 15;     // 2.4GHz bonus (better range)
             sample += ssidBonus(ap.ssid) * 0.1;
             
-            // Hard filter: don't Evil Twin APs too far away (phone AP too weak)
-            if (ap.signal < -82) sample -= 200;
+            // Hard filter: too far = can't hear client clearly, penalize but don't skip
+            if (ap.signal < -85) sample -= 50;
+            // Wi-Fi Direct printers have NO clients — massive penalty
+            if (ap.ssid != null && ap.ssid.toUpperCase().contains("DIRECT-")) sample -= 500;
             
             if (best == null || sample > bestSample) {
                 best = ap;
@@ -232,24 +232,18 @@ public class PwngBrain {
         }
         
         if (best == null) {
-            Decision d = new Decision("scan", "no viable attack targets");
+            Decision d = new Decision("scan", "no viable sniff targets");
             d.face = "(╥☁╥ )";
             return d;
         }
         
-        // Decide: Evil Twin only or Deauth + Evil Twin
-        // Use deauth if: we've had success before AND AP is on 2.4GHz (better range)
-        boolean useDeauth = (successfulEvilTwins >= 1 || failedEvilTwins < 2) && best.freq < 5000;
-        
-        Decision d = new Decision(
-            useDeauth ? "deauth_twin" : "evil_twin",
-            useDeauth ? "DEAUTH + Evil Twin: " + best.ssid : "Evil Twin: " + best.ssid
-        );
+        // Always use sniff_deauth — passive EAPOL capture after CSA deauth flood
+        Decision d = new Decision("sniff_deauth", "CSA + sniff: " + best.ssid);
         d.targetBssid = best.bssid;
         d.targetSsid = best.ssid;
         d.targetFreq = best.freq;
         d.face = "(⌐■_■)";
-        d.status = "attacking: " + best.ssid + " (" + best.signal + "dBm)" + (useDeauth ? " [DEAUTH]" : "");
+        d.status = "👃 sniff: " + best.ssid + " (" + best.signal + "dBm)";
         
         best.attempts++;
         best.lastAttempt = System.currentTimeMillis();
@@ -269,12 +263,11 @@ public class PwngBrain {
             
             if (success) {
                 ap.score += 5;
-                if (action.equals("evil_twin") || action.equals("deauth_twin")) {
-                    ap.evilTwinWorked = true;
+                if (action.equals("sniff_deauth")) {
                     ap.handshakeSuccess++;
                     totalHandshakes++;
                     successfulEvilTwins++;
-                    failedEvilTwins--; // Undo the pre-increment
+                    if (failedEvilTwins > 0) failedEvilTwins--;
                 }
                 if (action.equals("aggressive")) {
                     ap.pmkidFound = true;
@@ -282,12 +275,10 @@ public class PwngBrain {
                     totalPmkids++;
                 }
             } else {
-                // Only blacklist for technical failures, not for "no client"
-                // "No client" is normal - try again later
-                if (action.equals("evil_twin") || action.equals("deauth_twin")) {
-                    // Evil Twin failed technically (WiFi restore issue etc) - penalize hard
-                    ap.score -= 3;
-                    if (ap.attempts >= 5 && ap.score < -10) {
+                // Penalize only technical failures, not "no client nearby"
+                if (action.equals("sniff_deauth")) {
+                    ap.score -= 2;
+                    if (ap.attempts >= 6 && ap.score < -10) {
                         blacklistedSsids.add(ap.ssid);
                     }
                 } else {
@@ -303,7 +294,7 @@ public class PwngBrain {
         if (success) {
             cooldown = Math.max(5000, cooldown - 5000);
         } else if (!action.equals("wait") && !action.equals("scan")) {
-            cooldown = Math.min(60000, cooldown + 5000);
+            cooldown = Math.min(60000, cooldown + 10000);
         }
         
         // Only reset timer for real actions (not idle scans/waits)

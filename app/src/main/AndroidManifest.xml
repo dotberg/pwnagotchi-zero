@@ -38,7 +38,7 @@
 
         <service
             android:name=".PwngService"
-            android:exported="false"
+            android:exported="true"
             android:foregroundServiceType="dataSync" />
 
     </application>
