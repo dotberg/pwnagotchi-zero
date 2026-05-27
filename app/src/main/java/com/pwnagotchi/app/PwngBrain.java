@@ -238,6 +238,14 @@ public class PwngBrain {
         }
         
         // Always use sniff_deauth — passive EAPOL capture after CSA deauth flood
+        // 30% deauth probability: only attack 30% of cycles to avoid DoS-ing the target
+        if (Math.random() > 0.30) {
+            Decision d = new Decision("scan", "deauth flood protection — skipping attack cycle");
+            d.face = "(◕‿‿◕)";
+            d.status = "pacing... (" + currentApCount + " APs, " + currentWpa2Count + " WPA2)";
+            return d;
+        }
+        
         Decision d = new Decision("sniff_deauth", "CSA + sniff: " + best.ssid);
         d.targetBssid = best.bssid;
         d.targetSsid = best.ssid;

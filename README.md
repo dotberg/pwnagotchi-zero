@@ -115,16 +115,73 @@ The Qualcomm WiFi firmware (bdwlan_cuscoi_ipa.bin) has monitor mode support comp
 
 ## Installation
 
-```bash
-# Download latest APK from Releases
-adb install Pwnagotchi.apk
+### One-Time Setup (first time only)
 
-# The app auto-copies iw and firmware on first run
-# Manual pre-setup (one-time):
-adb shell su -c 'mkdir -p /data/local/tmp/fw/adrastea'
-adb shell su -c 'cp /vendor/firmware_mnt/image/adrastea/* /data/local/tmp/fw/adrastea/'
+```bash
+# 1. Install prerequisites via Termux
+pkg install tcpdump iw
+
+# 2. Copy binaries to accessible location
 adb shell su -c 'cp /data/data/com.termux/files/usr/bin/iw /data/local/tmp/iw'
 adb shell su -c 'cp /data/data/com.termux/files/usr/lib/libnl* /data/local/tmp/'
+
+# 3. Install the APK
+adb install Pwnagotchi.apk
+```
+
+### Post-Install / Post-Rebuild Procedure (EVERY TIME)
+
+**CRITICAL: After EVERY `adb install` (new UID), these steps are MANDATORY. Skipping any will result in \"0 APs\" or broken monitor mode.**
+
+```bash
+# STEP 1: Enable monitor mode (one-time per boot)
+adb shell su -c 'sh /data/local/tmp/monitor_start.sh'
+# Verify: cat /sys/module/adrastea/parameters/con_mode → must show "4"
+
+# STEP 2: Grant root in Magisk MANUALLY
+#    The APK's first `su` call triggers a Magisk root prompt.
+#    Tap "GRANT" on the phone screen.
+#    WHY: Every `adb install` gives the app a new UID.
+#         Magisk policies are per-UID — the old grant doesn't carry over.
+#         Without this, MonitorManager.enable() times out after 8s → no monitor mode.
+
+# STEP 3: Fix Motorola notification block
+adb shell su -c 'appops reset com.pwnagotchi.app'
+
+# STEP 4: Start the service
+adb shell am start-foreground-service -n com.pwnagotchi.app/.PwngService
+
+# STEP 5: Verify it's working
+sleep 10
+adb shell su -c 'cat /data/data/com.pwnagotchi.app/files/brain.mem' | head -3
+# Expected output:
+#   phase=0
+#   face=(◕‿‿◕)
+#   status=monitor mode active      ← THIS is the critical line
+
+# STEP 6: Verify AP visibility
+sleep 30
+adb shell su -c 'cat /data/data/com.pwnagotchi.app/files/brain.mem' | grep '^ap='
+# Should show access points. If empty → root not granted (step 2).
+```
+
+### Quick Health Check Commands
+
+```bash
+# Is the service running?
+adb shell su -c 'ps -A | grep pwn'
+
+# Is monitor mode active?
+adb shell su -c 'cat /sys/module/adrastea/parameters/con_mode'
+# 0 = normal, 4 = monitor
+
+# What's the brain thinking?
+adb shell su -c 'cat /data/data/com.pwnagotchi.app/files/brain.mem' | head -5
+
+# Check for captured handshakes (real ones have EAPOL!)
+adb shell su -c 'ls -la /data/local/tmp/handshakes/hs_*'
+adb shell su -c 'tcpdump -r /data/local/tmp/handshakes/hs_XXXX.pcap -n 2>/dev/null | grep -c EAPOL'
+# Must return > 0 for a real handshake. 0 = beacons only, discard the file.
 ```
 
 ## Building from Source

