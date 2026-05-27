@@ -205,8 +205,10 @@ public class PwngBrain {
         double bestSample = -999;
         for (ApKnowledge ap : apDB.values()) {
             if (!ap.flags.contains("WPA2-PSK") && !ap.flags.contains("WPA-PSK")) continue;
-            // Skip APs with WPA3/SAE/PMF — our deauth can't defeat Protected Management Frames
-            if (ap.flags.contains("SAE") || ap.flags.contains("MFP") || ap.flags.contains("PMF")) continue;
+            // Skip APs with enforced PMF only — SAE alone does NOT block deauth on 2.4 GHz
+            // MFP/PMF in flags with "capable" (not "required") still allows unprotected deauth
+            if (ap.flags.contains("MFP") && !ap.flags.contains("WPA2-PSK")) continue;
+            if (ap.flags.contains("PMF") && !ap.flags.contains("WPA2-PSK")) continue;
             if (blacklistedSsids.contains(ap.ssid)) continue;
             if (ap.evilTwinWorked) continue;
             
