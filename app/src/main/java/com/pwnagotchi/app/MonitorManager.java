@@ -18,9 +18,17 @@ public class MonitorManager {
     private static final String IFACE = "wlan0";
     private static final String IW_BIN = "/data/local/tmp/iw";
     private static final String IW_LIBS = "/data/local/tmp";
+    private static final String DEAUTH_BIN = "/data/local/tmp/deauth";
     
     private boolean monitorEnabled = false;
     
+    /**
+     * Send deauth frames to force clients to reconnect.
+     */
+    public void deauth(String apMac, String clientMac, int channel) {
+        if (!monitorEnabled) return;
+        execSuMagisk(DEAUTH_BIN + " " + IFACE + " " + apMac + " " + clientMac + " " + channel + " 2>/dev/null");
+    }
     /**
      * Stage firmware files from vendor partition.
      */

