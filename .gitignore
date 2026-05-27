@@ -1,10 +1,21 @@
-*.class
-*.dex
+# Build artifacts
 obj/
-bin/
 *.apk
-brain.mem
-.known_pmkids
-*.22000
+*.apk.idsig
+*.idsig
+
+# Signing keys (auto-generated, not for sharing)
 *.keystore
+*.jks
+*.p12
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# OS
 .DS_Store
+Thumbs.db
