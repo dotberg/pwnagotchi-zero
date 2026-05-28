@@ -217,4 +217,6 @@ sleep 2; su -c 'svc wifi enable'
 
 Built by **dotberg** — 6 hours of kernel module hell, solved by a firmware reload trick. Because the best tools come from being broke and having nothing but a rooted phone and determination.
 
+Pwnagotchi concept and faces (◕‿‿◕) by [evilsocket/pwnagotchi](https://github.com/evilsocket/pwnagotchi). This project is an independent Android-native reimplementation — no code was forked, only the AI-driven WiFi attacking spirit was borrowed.
+
 *"Monitor mode was always there. Qualcomm just hid it behind a firmware reload."*
