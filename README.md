@@ -118,6 +118,84 @@ device wlan0 entered promiscuous mode
 - **Termux** with `tcpdump`, `iw`, `libnl` (one-time setup)
 - ADB for initial deployment only
 
+## 🔬 The Qualcomm Monitor Mode Breakthrough
+
+*This is the part that took 6 hours of kernel module compilation hell to discover. Future researchers: skip the kernel modules, here's the trick.*
+
+### The Problem
+
+Qualcomm QCACLD-3.0 (adrastea driver on Motorola Edge 50 Fusion / cuscoi, kernel 5.10.198) has a `con_mode` parameter at `/sys/module/adrastea/parameters/con_mode`:
+
+- `0` = normal station mode  
+- `4` = monitor mode  
+
+But writing to it fails with `Permission denied` even as root. The `module_param` is declared with `S_IRUGO` (0444) — read-only. SELinux also blocks it. `CONFIG_MODULE_FORCE_LOAD=n` prevents forced loading. Kernel module compilation fails because `CONFIG_MODVERSIONS=y` enforces symbol CRC matching (and the vendor kernel's CRCs aren't in AOSP sources).
+
+### The Solution: Firmware Reload Trick
+
+The `con_mode` parameter becomes **writable during firmware reload**. The trick:
+
+1. Stage a copy of the WiFi firmware to a writable location  
+2. Point the kernel's firmware loader at the staging directory  
+3. Bring `wlan0` down  
+4. Write `4` to `con_mode` — this triggers a firmware reload because the path changed  
+5. During the reload, the parameter IS writable  
+6. Bring `wlan0` back up — it's now in monitor mode with `link/ieee802.11/radiotap`
+
+### The Code
+
+```bash
+# Stage firmware
+MOD=adrastea
+FW=/data/local/tmp/fw
+mkdir -p $FW/$MOD
+cp /vendor/firmware_mnt/image/$MOD/* $FW/$MOD/
+
+# Set firmware path (forces reload on con_mode write)
+echo -n "$FW" > /sys/module/firmware_class/parameters/path
+
+# Bring down, set monitor mode, bring up
+ip link set wlan0 down
+echo 4 > /sys/module/$MOD/parameters/con_mode
+sleep 4
+ip link set wlan0 up
+
+# Verify
+cat /sys/module/$MOD/parameters/con_mode  # should show "4"
+iw dev wlan0 info                            # should show "type monitor"
+tcpdump -i wlan0 -n -e                       # beacons should appear
+```
+
+### Key Requirements
+
+| Requirement | Why |
+|-------------|-----|
+| Root (Magisk) | Writing to sysfs, firmware path, ip link |
+| SELinux permissive | `setenforce 0` is usually needed (USB ADB helps) |
+| `tcpdump` + `su -Z u:r:magisk:s0` | `CAP_NET_RAW` needed for packet capture from app context |
+| `iw` with `libnl` | Channel setting (Termux provides these) |
+| Firmware staging directory | Must contain ALL firmware files from the vendor partition |
+
+### dmesg Confirmation
+
+```
+adrastea: [9:I:HTT] htt_h2t_rx_ring_cfg_msg_ll : Monitor mode is enabled
+adrastea: [16394:I:HDD] __hdd_driver_mode_change: Acquire wakelock for monitor mode
+device wlan0 entered promiscuous mode
+```
+
+### Why This Works
+
+The Qualcomm WiFi firmware (bdwlan_cuscoi_ipa.bin) has monitor mode support compiled in — it's just disabled by the kernel config (`CONFIG_FEATURE_MONITOR_MODE_SUPPORT := n` in qcacld-3.0). The firmware itself supports it. The `con_mode=4` write during firmware reload tells the firmware to boot in monitor mode. The kernel's module_param permission check is bypassed because the firmware reload path takes a different code path.
+
+### Related Research
+
+- [kimocoder/qualcomm_android_monitor_mode](https://github.com/kimocoder/qualcomm_android_monitor_mode) — Original research on QCACLD monitor mode
+- [spiral009/aviumui-wlan-tools](https://github.com/spiral009/aviumui-wlan-tools) — OnePlus monitor mode scripts (inspired the firmware reload approach)
+- Qualcomm CodeLinaro `qcacld-3.0` — `CONFIG_FEATURE_MONITOR_MODE_SUPPORT` flag exists but is off by default
+
+---
+
 ## Manual Monitor Mode (Without the App)
 
 ```bash
