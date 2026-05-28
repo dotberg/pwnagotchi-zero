@@ -67,17 +67,18 @@ public class MainActivity extends Activity {
 
         toggleButton.setOnClickListener(v -> {
             if (serviceRunning) {
-                Intent si = new Intent(this, PwngService.class);
-                si.setAction("STOP");
-                startService(si);
-                serviceRunning = false;
-                toggleButton.setText("[ START ]");
-                faceView.setText("(⇀‿‿↼)"); statusView.setText("sleeping...");
+                // RESTART: kill + auto-restart via START_STICKY
+                Intent ri = new Intent(this, PwngService.class);
+                ri.setAction("RESTART");
+                startService(ri);
+                // Don't change serviceRunning — it'll come back
+                toggleButton.setText("[ RESTARTING... ]");
+                faceView.setText("(⇀‿‿↼)"); statusView.setText("restarting...");
             } else {
                 new java.io.File(STOP_FILE).delete();
                 startServiceCompat(new Intent(this, PwngService.class));
                 serviceRunning = true;
-                toggleButton.setText("[ STOP ]");
+                toggleButton.setText("[ RESTART ]");
             }
         });
 
@@ -88,7 +89,7 @@ public class MainActivity extends Activity {
         } else {
             startServiceCompat(new Intent(this, PwngService.class));
             serviceRunning = true;
-            toggleButton.setText("[ STOP ]");
+            toggleButton.setText("[ RESTART ]");
         }
     }
 

