@@ -31,7 +31,7 @@ public class MatrixWallpaper extends WallpaperService {
 
         // Matrix chars: katakana + digits + hex
         private static final String MATRIX_CHARS =
-            "ｦｧｨｩｪｫｬｭｮｯｱｲｳｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾔﾕﾖﾗﾘﾙﾚﾛﾜ" +
+            "ｦｧｨｩｪｫｬｭｮｯｱｲｳｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜ" +
             "0123456789ABCDEFabcdef" +
             "01アイウエオカキクケコサシスセソタチツテト";
 
